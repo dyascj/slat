@@ -1,0 +1,29 @@
+{
+  "animation" : "snappy",
+  "appRules" : [
+
+  ],
+  "autoCenter" : false,
+  "createWorkspacesAutomatically" : false,
+  "defaultColumnWidth" : 0.5,
+  "dimInactiveWindows" : false,
+  "focusBorderEnabled" : false,
+  "focusFollowsMouse" : false,
+  "modKey" : "alt",
+  "mouseFollowsFocus" : false,
+  "padding" : "comfy",
+  "presetColumnWidths" : [
+    0.5,
+    0.66,
+    1
+  ],
+  "scrollModifier" : "alt",
+  "startAtLogin" : true,
+  "swipeDirection" : "Natural",
+  "swipeEnabled" : true,
+  "swipeFingers" : 4,
+  "swipeSensitivity" : 0.35,
+  "useCustomConfigFile" : false,
+  "virtualWorkspaceCount" : 4,
+  "virtualWorkspacesEnabled" : true
+}

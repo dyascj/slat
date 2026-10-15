@@ -143,7 +143,11 @@ fn curl(args: &[&str]) -> Result<Vec<u8>, String> {
 
 /// The latest release when it is newer than us and has a signed build.
 fn check() -> Result<Option<Release>, String> {
-    let body = curl(&["-m", "10", FEED])?;
+    let body = match curl(&["-m", "10", FEED]) {
+        // GitHub answers 404 while the repo has no releases yet: nothing newer.
+        Err(e) if e.contains("error: 404") => return Ok(None),
+        r => r?,
+    };
     let v: serde_json::Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
     let tag = v["tag_name"].as_str().unwrap_or_default();
     let version = tag.trim_start_matches('v').to_string();

@@ -40,6 +40,7 @@ use crate::menubar::MenuBarManager;
 use crate::overlay::{FlashMessageManager, OverlayManager};
 use crate::platform::{Modifiers, PlatformCallbacks, WinID, WorkspaceId};
 
+pub mod canvas;
 pub mod display;
 pub mod focus;
 pub mod layout;
@@ -78,10 +79,6 @@ pub fn register_systems(app: &mut bevy::app::App) {
             .iter()
             .next()
             .is_none_or(|marker| !marker.is_user_swiping)
-    };
-    let dimming_enabled = |config: Option<Res<Config>>| {
-        config
-            .is_some_and(|config| config.has_dim_inactive_color() || config.border_active_window())
     };
     // The overlay must refresh not just when the active strip's layout changes,
     // but also whenever focus moves — including focus *loss* (e.g. switching to
@@ -176,7 +173,17 @@ pub fn register_systems(app: &mut bevy::app::App) {
             state::cleanup_on_exit,
             script_state::periodic_script_state_save.run_if(on_timer(Duration::from_mins(5))),
             script_state::script_state_cleanup_on_exit,
+            canvas::periodic_canvas_save.run_if(on_timer(Duration::from_mins(5))),
+            canvas::canvas_save_on_exit,
         ),
+    );
+    app.add_systems(Update, systems::sync_native_dim);
+    app.add_systems(
+        Update,
+        systems::fold_tab_switch_on_focus
+            .after(triggers::window_focused_trigger)
+            .run_if(native_tabs_enabled)
+            .run_if(not(resource_exists::<Initializing>)),
     );
     app.add_systems(
         PostUpdate,
@@ -190,15 +197,18 @@ pub fn register_systems(app: &mut bevy::app::App) {
             (
                 systems::animate_resize_entities,
                 systems::commit_window_size.run_if(not(resource_exists::<Initializing>)),
+                systems::verify_window_size.run_if(not(resource_exists::<Initializing>)),
             )
                 .chain(),
             (
                 systems::update_overlays
                     .after(systems::animate_entities)
                     .after(systems::animate_resize_entities)
-                    .run_if(dimming_enabled)
+                    .run_if(systems::overlay_decorations_enabled)
                     .run_if(vw_indicator_dirty),
                 systems::update_flash_messages,
+                systems::release_disabled_overlays
+                    .run_if(not(systems::overlay_decorations_enabled)),
             )
                 .chain(),
             crate::menubar::update_menu_bar
@@ -482,6 +492,11 @@ impl VerifyWindowPosition {
 #[derive(Component)]
 pub struct VerifyWindowSize;
 
+/// Retry budget for re-checking a window's size after an animated resize:
+/// apps that do not honour the requested size get it applied again.
+#[derive(Component)]
+pub struct VerifyResize(pub u8);
+
 #[derive(Deref, DerefMut, Resource)]
 pub struct LowPowerMode(pub bool);
 
@@ -688,6 +703,7 @@ fn autorelease_runner(mut app: BevyApp) -> bevy::app::AppExit {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<BevyApp> {
     crate::manager::app::bound_ax_messaging_timeout()?;
 
@@ -799,6 +815,15 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
         PaneruState::load_from_file(&PaneruState::default_state_file_path())
     {
         app.insert_resource(previous_state);
+    }
+
+    // Loaded even in Columns mode, so switching to Canvas within the validity
+    // window still finds it.
+    if let Some(path) = canvas::default_state_file_path() {
+        if let Some(saved) = canvas::load_saved_state(&path) {
+            app.insert_resource(saved);
+        }
+        app.insert_resource(canvas::CanvasStatePath(path));
     }
 
     // Overwrites the empty store `register_commands` put there, which is what

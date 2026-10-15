@@ -1,7 +1,7 @@
 # Query and Subscribe Format
 
 Paneru exposes structured state over the same IPC channel used by `send-cmd`:
-a Mach service named `com.github.karinushka.paneru`. The CLI commands below
+a Mach service named `io.github.dyascj.slat.engine`. The CLI commands below
 require a running Paneru daemon.
 
 **The JSON below is what the CLI prints, not what crosses between processes.**

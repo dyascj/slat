@@ -458,6 +458,10 @@ impl QueryStateParams<'_, '_> {
 /// windows, this keeps the strip's column structure — needed for `ws:swap`,
 /// `ws:east`, `ws:stack` and friends to know what is beside what.
 impl QueryStateParams<'_, '_> {
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "callers already handle a failed read; kept fallible for future reads"
+    )]
     pub fn extract_window_set(&self) -> crate::errors::Result<WindowSet> {
         use crate::types::windowset::{ColumnSet, DisplaySet, WorkspaceSet};
 
@@ -477,7 +481,7 @@ impl QueryStateParams<'_, '_> {
             let floating_entities = if active_workspace
                 || selected_workspace && active_workspace_id != Some(strip.id())
             {
-                self.window_manager.windows_in_workspace(strip.id())?
+                workspace_window_ids(&self.window_manager, strip.id())
             } else {
                 Vec::new()
             };
@@ -679,7 +683,7 @@ impl QueryState for PaneruQueryState {
             let floating = if active_workspace
                 || selected_workspace && active_workspace_id != Some(strip.id())
             {
-                window_manager.windows_in_workspace(strip.id())?
+                workspace_window_ids(window_manager, strip.id())
             } else {
                 Vec::new()
             }
@@ -798,6 +802,18 @@ fn now_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// The window ids on a workspace, for picking out its floating windows. A
+/// failed read leaves the floating list empty instead of failing the whole
+/// state query or save.
+fn workspace_window_ids(window_manager: &WindowManager, id: WorkspaceId) -> Vec<WinID> {
+    window_manager
+        .windows_in_workspace(id)
+        .unwrap_or_else(|err| {
+            debug!("no floating windows read for workspace {id}: {err}");
+            Vec::new()
+        })
 }
 
 pub fn periodic_state_save(

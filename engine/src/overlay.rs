@@ -328,6 +328,11 @@ impl OverlayManager {
         self.hidden = false;
     }
 
+    /// True when no overlay window exists.
+    pub fn is_empty(&self) -> bool {
+        self.overlays.is_empty()
+    }
+
     pub fn remove_all(&mut self) {
         for (window, _) in self.overlays.drain(..) {
             window.orderOut(None::<&AnyObject>);

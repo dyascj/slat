@@ -18,7 +18,7 @@ pub use async_mach_ports::{Codec, Error, RecvPort, SendPort};
 /// Matches the launchd job's `Label` and its `MachServices` key, which is what
 /// lets a service-started daemon check in with a port launchd already holds
 /// rather than registering one of its own.
-pub const SERVICE_NAME: &str = "com.github.karinushka.paneru";
+pub const SERVICE_NAME: &str = "io.github.dyascj.slat.engine";
 
 /// The environment variable that overrides [`SERVICE_NAME`], so a development
 /// build can run beside an installed one.

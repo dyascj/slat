@@ -26,6 +26,14 @@ use crate::{
     platform::{OSStatus, WinID},
 };
 
+/// True when the engine runs under the Slat host app, which sets
+/// `SLAT_EMBEDDED=1`. The host then owns logging, configuration, the menu bar
+/// and the service lifecycle.
+#[must_use]
+pub fn embedded() -> bool {
+    std::env::var_os("SLAT_EMBEDDED").is_some_and(|v| v == "1")
+}
+
 /// Converts a floating-point pixel measurement into whole pixels.
 ///
 /// Rounds rather than truncates, since truncating biases every derived

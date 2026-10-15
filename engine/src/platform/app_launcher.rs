@@ -12,7 +12,7 @@ use crate::util::exe_path;
 
 const APP_BUNDLE_NAME: &str = "Paneru.app";
 const APP_EXECUTABLE_NAME: &str = "PaneruLauncher";
-const APP_BUNDLE_ID: &str = "com.github.karinushka.paneru.launcher";
+const APP_BUNDLE_ID: &str = "io.github.dyascj.slat.engine.launcher";
 
 pub struct AppLauncher {
     paneru_path: PathBuf,

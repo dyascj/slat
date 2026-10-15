@@ -6,13 +6,14 @@ use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::query::{Changed, Has, Or, With, Without};
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::schedule::common_conditions::{not, resource_exists};
-use bevy::ecs::system::{Commands, ParamSet, Populated, Query, Res};
+use bevy::ecs::system::{Commands, Local, ParamSet, Populated, Query, Res};
 use bevy::math::IRect;
 use std::collections::VecDeque;
 use stdext::function_name;
-use tracing::{Level, instrument, trace};
+use tracing::{Level, debug, instrument, trace};
 
 use crate::config::Config;
+use crate::ecs::canvas::{self, DeskPosition};
 use crate::ecs::params::Windows;
 use crate::ecs::workspace::{PreviousStripPosition, SnapStripMarker};
 use crate::ecs::{
@@ -195,8 +196,12 @@ impl Plugin for LayoutEventsPlugin {
                 // Wait for finish_setup before tiling: until then every window
                 // sits in the active strip regardless of its real display.
                 (
+                    canvas::canvas_assign_desks.run_if(canvas::canvas_enabled),
+                    canvas::canvas_drag_settle.run_if(canvas::canvas_enabled),
+                    canvas::canvas_layout_mode_switch,
                     layout_sizes_changed,
                     layout_strip_changed,
+                    reclamp_after_removal,
                     reshuffle_layout_strip,
                     ensure_visible_in_strip,
                     position_layout_strips,
@@ -207,8 +212,12 @@ impl Plugin for LayoutEventsPlugin {
                     .after(super::triggers::apply_window_positions)
                     .before(super::workspace::show_active_workspace)
                     .run_if(not(resource_exists::<Initializing>)),
+                canvas::canvas_mark_new_windows
+                    .after(super::triggers::apply_window_positions)
+                    .before(canvas::canvas_assign_desks),
             ),
         );
+        app.add_observer(canvas::canvas_window_unmanaged);
     }
 }
 
@@ -770,48 +779,62 @@ impl LayoutStrip {
     /// `Ok(())` if the stacking is successful or not needed, otherwise `Err(Error)` if the window is not found.
     pub fn stack(&mut self, entity: Entity) -> Result<()> {
         let index = self.index_of(entity)?;
-        if index == 0 {
-            // Can not stack to the left if left most window already.
-            return Ok(());
+        // Can not stack to the left if left most window already.
+        if index > 0 {
+            self.merge_column_into(index, index - 1);
         }
+        Ok(())
+    }
 
-        let column_to_stack = self.columns.remove(index).unwrap();
-        let items_to_stack = match column_to_stack {
-            Column::Fullscren(_) => return Ok(()),
-            Column::Single(id) => vec![StackItem::Single(id)],
+    /// Stacks the window with the given ID onto the panel to its right. The
+    /// right-hand column stays on top, the moved one joins at the bottom.
+    pub fn stack_east(&mut self, entity: Entity) -> Result<()> {
+        let index = self.index_of(entity)?;
+        if index + 1 < self.len() {
+            self.merge_column_into(index, index + 1);
+        }
+        Ok(())
+    }
+
+    /// Merges the column at `from` into the column at `into`: the target's
+    /// items stay on top and the moved items are appended below them.
+    /// Fullscreen columns are never merged.
+    pub(crate) fn merge_column_into(&mut self, from: usize, into: usize) {
+        let mergeable = |column: Option<&Column>| {
+            column.is_some_and(|column| !matches!(column, Column::Fullscren(_)))
+        };
+        if from == into || !mergeable(self.columns.get(from)) || !mergeable(self.columns.get(into))
+        {
+            return;
+        }
+        let into_stack_items = |column: Column| match column {
+            Column::Single(id) | Column::Fullscren(id) => vec![StackItem::Single(id)],
             Column::Tabs(tabs) => vec![StackItem::Tabs(tabs)],
             Column::Stack(items) => items,
         };
 
-        let target_column = self.columns.remove(index - 1).unwrap();
+        let moved = into_stack_items(self.columns.remove(from).unwrap());
+        let into = if from < into { into - 1 } else { into };
+        let target = self.columns.remove(into).unwrap();
         // If the column being merged into is already a tabbed display, the
-        // newly-joined items must join `tabbed_stacks` too — otherwise the
+        // newly-joined items must join `tabbed_stacks` too. Otherwise the
         // merged Stack would end up with a mix of tabbed and split members,
         // which `relative_positions`'s tabbed-column geometry branch isn't
         // designed to represent.
-        if let Column::Stack(items) = &target_column
+        if let Column::Stack(items) = &target
             && items
                 .iter()
                 .flat_map(StackItem::window_iter)
                 .any(|e| self.tabbed_stacks.contains(&e))
         {
-            for item in &items_to_stack {
+            for item in &moved {
                 self.tabbed_stacks.extend(item.window_iter());
             }
         }
-        let new_column = match target_column {
-            Column::Fullscren(_) => return Ok(()),
-            Column::Single(id) => {
-                Column::Stack([vec![StackItem::Single(id)], items_to_stack].concat())
-            }
-            Column::Tabs(tabs) => {
-                Column::Stack([vec![StackItem::Tabs(tabs)], items_to_stack].concat())
-            }
-            Column::Stack(items) => Column::Stack([items, items_to_stack].concat()),
-        };
-
-        self.columns.insert(index - 1, new_column);
-        Ok(())
+        self.columns.insert(
+            into,
+            Column::Stack([into_stack_items(target), moved].concat()),
+        );
     }
 
     /// Unstacks the window with the given ID from its entity stack.
@@ -825,6 +848,12 @@ impl LayoutStrip {
     ///
     /// `Ok(())` if the unstacking is successful or not needed, otherwise `Err(Error)` if the window is not found.
     pub fn unstack(&mut self, entity: Entity) -> Result<()> {
+        self.unstack_to_side(entity, false)
+    }
+
+    /// Unstacks the window with the given ID into its own column, placed to
+    /// the left of the remaining stack when `west`, to the right otherwise.
+    pub fn unstack_to_side(&mut self, entity: Entity, west: bool) -> Result<()> {
         let index = self.index_of(entity)?;
         let column = self.columns.remove(index).unwrap();
 
@@ -842,29 +871,39 @@ impl LayoutStrip {
                 self.tabbed_stacks.remove(&e);
             }
 
-            // Re-insert the unstacked item as a single/tabs panel
+            // The unstacked item becomes a single/tabs panel.
             let unstacked_column = match removed_item {
                 StackItem::Single(id) => Column::Single(id),
                 StackItem::Tabs(tabs) => Column::Tabs(tabs),
             };
-            self.columns.insert(index, unstacked_column);
 
-            // Re-insert the modified stack (if not empty) at the original position
-            if !items.is_empty() {
-                let new_column = if items.len() == 1 {
-                    // A single surviving item can no longer be a tabbed
-                    // display — drop its membership (see remove_column).
-                    for e in items[0].window_iter() {
-                        self.tabbed_stacks.remove(&e);
-                    }
-                    match items.remove(0) {
-                        StackItem::Single(id) => Column::Single(id),
-                        StackItem::Tabs(tabs) => Column::Tabs(tabs),
-                    }
-                } else {
-                    Column::Stack(items)
-                };
-                self.columns.insert(index, new_column);
+            // What is left of the stack (if anything) stays a column.
+            let rest = if items.is_empty() {
+                None
+            } else if items.len() == 1 {
+                // A single surviving item can no longer be a tabbed
+                // display, so drop its membership (see remove_column).
+                for e in items[0].window_iter() {
+                    self.tabbed_stacks.remove(&e);
+                }
+                Some(match items.remove(0) {
+                    StackItem::Single(id) => Column::Single(id),
+                    StackItem::Tabs(tabs) => Column::Tabs(tabs),
+                })
+            } else {
+                Some(Column::Stack(items))
+            };
+
+            if west {
+                if let Some(rest) = rest {
+                    self.columns.insert(index, rest);
+                }
+                self.columns.insert(index, unstacked_column);
+            } else {
+                self.columns.insert(index, unstacked_column);
+                if let Some(rest) = rest {
+                    self.columns.insert(index, rest);
+                }
             }
             Ok(())
         } else {
@@ -889,6 +928,12 @@ impl LayoutStrip {
                 Column::Tabs(ids) => ids.clone(),
             })
             .collect()
+    }
+
+    /// Stable-sorts the columns by `key`. Canvas mode keeps the column order
+    /// in step with the windows' horizontal desk positions this way.
+    pub(crate) fn sort_columns_by_key<K: Ord>(&mut self, key: impl FnMut(&Column) -> K) {
+        self.columns.make_contiguous().sort_by_key(key);
     }
 
     pub fn get_column_mut(&mut self, index: usize) -> Option<&mut Column> {
@@ -1232,8 +1277,9 @@ fn stack_item_has_changed_window(item: &StackItem, changed_entities: &EntityHash
 /// re-calculates the logical positions of all the windows in the layout strip.
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn layout_strip_changed(
-    changed_strips: Populated<(&LayoutStrip, &ChildOf), Changed<LayoutStrip>>,
+    changed_strips: Populated<(Entity, &LayoutStrip, &ChildOf), Changed<LayoutStrip>>,
     mut windows: WindowFrames,
+    desks: Query<&DeskPosition>,
     displays: DisplayViewports,
     config: Res<Config>,
 ) {
@@ -1244,9 +1290,36 @@ pub(super) fn layout_strip_changed(
             .ok()
     };
 
+    // In Canvas mode a window's slot is its desk position and its size is its
+    // own. Windows without a desk yet keep their old slot until
+    // `canvas_assign_desks` gives them one. Fullscreen strips stay packed.
+    let canvas = config.canvas();
+    let desk_items = if canvas {
+        changed_strips
+            .iter()
+            .filter(|(_, strip, _)| !strip.is_fullscreen())
+            .flat_map(|(strip_entity, strip, _)| {
+                strip
+                    .all_windows()
+                    .into_iter()
+                    .filter_map(|entity| {
+                        desks
+                            .get(entity)
+                            .ok()
+                            .filter(|desk| desk.strip == strip_entity)
+                            .map(|desk| (entity, desk.pos))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    } else {
+        vec![]
+    };
+
     let changed = changed_strips
         .into_iter()
-        .filter_map(|(layout_strip, child_of)| {
+        .filter(|(_, strip, _)| !canvas || strip.is_fullscreen())
+        .filter_map(|(_, layout_strip, child_of)| {
             displays
                 .get(child_of.parent())
                 .map(|(display, dock)| {
@@ -1257,6 +1330,14 @@ pub(super) fn layout_strip_changed(
         })
         .flatten()
         .collect::<Vec<_>>();
+
+    for (entity, desk) in desk_items {
+        if let Ok((_, _, mut layout_position)) = windows.get_mut(entity)
+            && layout_position.0 != desk
+        {
+            layout_position.0 = desk;
+        }
+    }
 
     for (entity, frame) in changed {
         if let Ok((_, mut bounds, mut layout_position)) = windows.get_mut(entity) {
@@ -1270,6 +1351,83 @@ pub(super) fn layout_strip_changed(
     }
 }
 
+/// The strip offset that brings a row back on screen after it lost a
+/// window and none of the rest is visible any more. `spans` are the windows'
+/// horizontal extents in strip coordinates. `None` when something is still
+/// visible (or there is nothing to show).
+pub(crate) fn reclamp_offset(spans: &[(i32, i32)], offset_x: i32, viewport: IRect) -> Option<i32> {
+    let lo = spans.iter().map(|span| span.0).min()?;
+    let hi = spans.iter().map(|span| span.1).max()?;
+    let visible = spans
+        .iter()
+        .any(|&(min, max)| min + offset_x < viewport.max.x && max + offset_x > viewport.min.x);
+    if visible {
+        return None;
+    }
+    let new_x = if hi + offset_x <= viewport.min.x {
+        // Everything is past the left edge: slide right by the smaller of
+        // "last window touches the right edge" and "first touches the left".
+        (viewport.min.x - lo).min(viewport.max.x - hi)
+    } else {
+        viewport.min.x - lo
+    };
+    (new_x != offset_x).then_some(new_x)
+}
+
+/// When a window leaves the active strip and what is left is entirely off
+/// screen (e.g. the last visible window closed), slides the row back into
+/// view instead of leaving an empty display.
+#[allow(clippy::type_complexity)]
+#[instrument(level = Level::DEBUG, skip_all)]
+pub(super) fn reclamp_after_removal(
+    strips: Populated<
+        (
+            Entity,
+            &LayoutStrip,
+            &Position,
+            Option<&RepositionMarker>,
+            &ChildOf,
+            Has<Scrolling>,
+        ),
+        (Changed<LayoutStrip>, With<ActiveWorkspaceMarker>),
+    >,
+    displays: DisplayViewports,
+    windows: Windows,
+    config: Res<Config>,
+    mut counts: Local<EntityHashMap<usize>>,
+    mut commands: Commands,
+) {
+    for (strip_entity, strip, position, reposition, child_of, scrolling) in &strips {
+        let all = strip.all_windows();
+        let shrunk = matches!(counts.insert(strip_entity, all.len()), Some(previous) if all.len() < previous);
+        if scrolling || !shrunk || strip.is_fullscreen() {
+            continue;
+        }
+        let Ok((display, dock)) = displays.get(child_of.parent()) else {
+            continue;
+        };
+        let viewport = display.actual_display_bounds(dock, &config);
+        let target = reposition.map_or(position.0, |reposition| reposition.0);
+        let spans = all
+            .iter()
+            .filter_map(|&entity| {
+                let x = windows.layout_position(entity)?.0.x;
+                let width = windows.size(entity)?.x;
+                Some((x, x + width))
+            })
+            .collect::<Vec<_>>();
+        let Some(new_x) = reclamp_offset(&spans, target.x, viewport) else {
+            continue;
+        };
+        debug!("reclamp_after_removal: row {strip_entity} was empty on screen, sliding to {new_x}");
+        if let Ok(mut entity_commands) = commands.get_entity(strip_entity) {
+            entity_commands.try_remove::<ManualStripOffset>();
+        }
+        commands.reposition_entity(strip_entity, Origin::new(new_x, target.y));
+    }
+}
+
+#[allow(clippy::too_many_lines)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn reshuffle_layout_strip(
     markers: ReshuffleMarkers,
@@ -1310,6 +1468,26 @@ pub(super) fn reshuffle_layout_strip(
             let Some(mut frame) = windows.moving_frame(entity) else {
                 return;
             };
+
+            // Canvas: pan the desk just enough to show the window. No manual
+            // offset, edge invariant or sliver logic, which assume packing.
+            if config.canvas() && !strip.is_fullscreen() {
+                let target = strip_reposition.map_or(active_strip.0, |reposition| reposition.0);
+                let x = canvas::canvas_pan_x(
+                    layout_position.0.x,
+                    frame.width(),
+                    target.x,
+                    display_bounds,
+                    config.auto_center(),
+                    config.window_hidden_ratio(),
+                );
+                let position = Origin::new(x, display_bounds.min.y);
+                if position != target {
+                    debug!("reshuffle_layout_strip: canvas pan for {entity} to {position}");
+                    commands.reposition_entity(strip_entity, position);
+                }
+                return;
+            }
 
             let size = frame.size();
             let strip_target = strip_reposition.map_or(active_strip.0, |reposition| reposition.0);
@@ -1984,6 +2162,32 @@ mod tests {
     }
 
     #[test]
+    fn reclamp_slides_an_empty_row_back() {
+        let viewport = IRect::new(0, 25, 1000, 800);
+        // Still visible: nothing to do.
+        assert_eq!(
+            reclamp_offset(&[(0, 400), (400, 800)], -500, viewport),
+            None
+        );
+        // Everything past the left edge: the last window right-aligns, unless
+        // left-aligning the first is the shorter slide.
+        assert_eq!(
+            reclamp_offset(&[(0, 400), (400, 800)], -900, viewport),
+            Some(0)
+        );
+        assert_eq!(
+            reclamp_offset(&[(0, 400), (400, 1600)], -1700, viewport),
+            Some(-600)
+        );
+        // Everything past the right edge: the first window left-aligns.
+        assert_eq!(
+            reclamp_offset(&[(1200, 1600), (1600, 2000)], 0, viewport),
+            Some(-1200)
+        );
+        assert_eq!(reclamp_offset(&[], 0, viewport), None);
+    }
+
+    #[test]
     fn clamp_origin_supports_oversized_windows() {
         let viewport = IRect::new(0, 20, 1024, 768);
         let size = Size::new(2048, 748);
@@ -2023,6 +2227,77 @@ mod tests {
         strip.append(entities[2]);
 
         (world, strip, entities)
+    }
+
+    /// Column tops and member counts, e.g. `[(e0, 2), (e2, 1)]`.
+    fn shape(strip: &LayoutStrip) -> Vec<(Entity, usize)> {
+        strip
+            .columns()
+            .map(|column| (column.top().unwrap(), column.window_iter().count()))
+            .collect()
+    }
+
+    #[test]
+    fn stack_east_merges_into_the_right_column() {
+        let (_world, mut strip, e) = setup_world_and_strip();
+        strip.stack_east(e[0]).unwrap();
+        // The right-hand window stays on top, the moved one goes below it.
+        assert_eq!(shape(&strip), vec![(e[1], 2), (e[2], 1)]);
+        assert_eq!(strip.all_windows(), vec![e[1], e[0], e[2]]);
+
+        // Already the rightmost column: nothing to merge into.
+        strip.stack_east(e[2]).unwrap();
+        assert_eq!(shape(&strip), vec![(e[1], 2), (e[2], 1)]);
+
+        // A stack merges as a whole.
+        strip.stack_east(e[0]).unwrap();
+        assert_eq!(strip.all_windows(), vec![e[2], e[1], e[0]]);
+        assert_eq!(strip.len(), 1);
+    }
+
+    #[test]
+    fn stack_west_matches_upstream() {
+        let (_world, mut strip, e) = setup_world_and_strip();
+        strip.stack(e[0]).unwrap();
+        assert_eq!(
+            strip.len(),
+            3,
+            "the leftmost column has nothing to its left"
+        );
+        strip.stack(e[2]).unwrap();
+        assert_eq!(shape(&strip), vec![(e[0], 1), (e[1], 2)]);
+        assert_eq!(strip.all_windows(), vec![e[0], e[1], e[2]]);
+    }
+
+    #[test]
+    fn unstack_picks_a_side() {
+        let (_world, mut strip, e) = setup_world_and_strip();
+        strip.stack(e[1]).unwrap();
+        strip.stack(e[2]).unwrap();
+        assert_eq!(shape(&strip), vec![(e[0], 3)]);
+
+        // East (the plain unstack): the window lands right of its stack.
+        strip.unstack_to_side(e[1], false).unwrap();
+        assert_eq!(shape(&strip), vec![(e[0], 2), (e[1], 1)]);
+
+        // West: left of what is left of the stack, which collapses to a single.
+        strip.unstack_to_side(e[2], true).unwrap();
+        assert_eq!(shape(&strip), vec![(e[2], 1), (e[0], 1), (e[1], 1)]);
+
+        // Not in a stack: nothing happens.
+        strip.unstack_to_side(e[1], true).unwrap();
+        assert_eq!(strip.all_windows(), vec![e[2], e[0], e[1]]);
+    }
+
+    #[test]
+    fn merge_never_touches_fullscreen_columns() {
+        let mut world = World::new();
+        let e = world.spawn_batch(vec![(), ()]).collect::<Vec<Entity>>();
+        let mut strip = LayoutStrip::fullscreen(1, e[0]);
+        strip.append(e[1]);
+        strip.stack(e[1]).unwrap();
+        assert_eq!(strip.all_windows(), vec![e[0], e[1]]);
+        assert_eq!(strip.len(), 2);
     }
 
     #[test]

@@ -1,3 +1,4 @@
+mod canvas;
 mod display;
 mod focus_or_virtual;
 mod harness;

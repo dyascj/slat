@@ -10,7 +10,7 @@ use tracing::{info, warn};
 use crate::util::exe_path;
 
 /// The bundle identifier for the `paneru` service.
-pub const ID: &str = "com.github.karinushka.paneru";
+pub const ID: &str = "io.github.dyascj.slat.engine";
 
 /// `Service` manages the installation, uninstallation, starting, and stopping of the `paneru` application as a launchd service.
 /// It encapsulates the `launchctl::Service` and the path to the executable.
@@ -30,7 +30,7 @@ impl Service {
     ///
     /// # Arguments
     ///
-    /// * `name` - The name of the service (e.g., "com.github.karinushka.paneru").
+    /// * `name` - The name of the service (e.g., "io.github.dyascj.slat.engine").
     ///
     /// # Returns
     ///
@@ -93,7 +93,7 @@ impl Service {
         let mut plist = fs::File::create(plist_path)?;
         plist.write_all(self.launchd_plist().as_bytes())?;
         info!("installed launch agent to `{}`", plist_path.display());
-        info!("check logfile /tmp/com.github.karinushka.paneru*.log for potential error messages");
+        info!("check logfile /tmp/io.github.dyascj.slat.engine*.log for potential error messages");
         Ok(())
     }
 
@@ -213,6 +213,11 @@ impl Service {
     /// Used by the in-daemon restart command so launchctl stop/start runs outside
     /// the process being stopped.
     pub fn request_restart() -> Result<()> {
+        if crate::util::embedded() {
+            return Err(Error::other(
+                "restart is handled by the host app in embedded mode",
+            ));
+        }
         let bin_path = exe_path().ok_or(Error::new(
             ErrorKind::NotFound,
             "Cannot find current executable path.",
@@ -266,9 +271,9 @@ mod tests {
 
     fn service() -> launchctl::Service {
         launchctl::Service::builder()
-            .name("com.github.karinushka.paneru")
+            .name("io.github.dyascj.slat.engine")
             .uid("501")
-            .plist_path("/Users/test/Library/LaunchAgents/com.github.karinushka.paneru.plist")
+            .plist_path("/Users/test/Library/LaunchAgents/io.github.dyascj.slat.engine.plist")
             .build()
     }
 
@@ -276,7 +281,7 @@ mod tests {
     fn start_kickstarts_a_bootstrapped_service_by_service_target() {
         assert_eq!(
             start_commands(&service(), true),
-            vec![vec!["kickstart", "gui/501/com.github.karinushka.paneru"]]
+            vec![vec!["kickstart", "gui/501/io.github.dyascj.slat.engine"]]
         );
     }
 
@@ -285,11 +290,11 @@ mod tests {
         assert_eq!(
             start_commands(&service(), false),
             vec![
-                vec!["enable", "gui/501/com.github.karinushka.paneru"],
+                vec!["enable", "gui/501/io.github.dyascj.slat.engine"],
                 vec![
                     "bootstrap",
                     "gui/501",
-                    "/Users/test/Library/LaunchAgents/com.github.karinushka.paneru.plist"
+                    "/Users/test/Library/LaunchAgents/io.github.dyascj.slat.engine.plist"
                 ]
             ]
         );

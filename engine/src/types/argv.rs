@@ -91,8 +91,18 @@ fn parse_operation(argv: &[&str]) -> Result<Operation> {
         "manage" => Operation::Manage,
         "equalize" => Operation::Equalize,
         "balance" => Operation::Balance,
-        "stack" => Operation::Stack(true),
-        "unstack" => Operation::Stack(false),
+        // An optional side: `stack [west|east]`, `unstack [east|west]`. The
+        // plain forms keep their original meaning (stack west, unstack east).
+        "stack" => match argv.get(1).copied() {
+            None | Some("west") => Operation::Stack(true),
+            Some("east") => Operation::StackEast,
+            Some(_) => return Err(err()),
+        },
+        "unstack" => match argv.get(1).copied() {
+            None | Some("east") => Operation::Stack(false),
+            Some("west") => Operation::UnstackWest,
+            Some(_) => return Err(err()),
+        },
         "tabbeddisplay" => Operation::ToggleTabbedDisplay,
         "nextdisplay" => Operation::ToNextDisplay(MoveFocus::Follow),
         "nextdisplaysend" => Operation::ToNextDisplay(MoveFocus::Stay),
@@ -196,6 +206,8 @@ impl Operation {
             Operation::Manage => owned(&["manage"]),
             Operation::Stack(true) => owned(&["stack"]),
             Operation::Stack(false) => owned(&["unstack"]),
+            Operation::StackEast => owned(&["stack", "east"]),
+            Operation::UnstackWest => owned(&["unstack", "west"]),
             Operation::ToggleTabbedDisplay => owned(&["tabbeddisplay"]),
             Operation::Snap => owned(&["snap"]),
             Operation::Virtual(direction) => vec!["virtual".to_string(), direction.token()],
@@ -255,6 +267,8 @@ mod tests {
             Operation::Manage,
             Operation::Stack(true),
             Operation::Stack(false),
+            Operation::StackEast,
+            Operation::UnstackWest,
             Operation::ToggleTabbedDisplay,
             Operation::Snap,
             Operation::Virtual(Direction::First),
@@ -311,6 +325,38 @@ mod tests {
             "the first window is number 1"
         );
         assert!(Direction::parse_positional("0").is_err());
+    }
+
+    #[test]
+    fn stack_sides_parse() {
+        let parse = |argv: &[&str]| parse_command(argv).ok();
+        let window = |op| Some(Command::Window(op));
+        assert_eq!(parse(&["window", "stack"]), window(Operation::Stack(true)));
+        assert_eq!(
+            parse(&["window", "stack", "west"]),
+            window(Operation::Stack(true))
+        );
+        assert_eq!(
+            parse(&["window", "stack", "east"]),
+            window(Operation::StackEast)
+        );
+        assert_eq!(
+            parse(&["window", "unstack"]),
+            window(Operation::Stack(false))
+        );
+        assert_eq!(
+            parse(&["window", "unstack", "east"]),
+            window(Operation::Stack(false))
+        );
+        assert_eq!(
+            parse(&["window", "unstack", "west"]),
+            window(Operation::UnstackWest)
+        );
+        // Binding names arrive split on `_`.
+        let binding = "window_unstack_west".split('_').collect::<Vec<_>>();
+        assert_eq!(parse(&binding), window(Operation::UnstackWest));
+        assert!(parse_command(&["window", "stack", "north"]).is_err());
+        assert!(parse_command(&["window", "unstack", "up"]).is_err());
     }
 
     #[test]

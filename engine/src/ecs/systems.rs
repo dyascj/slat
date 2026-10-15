@@ -20,7 +20,7 @@ use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
     ActiveDisplayMarker, BProcess, ExistingMarker, FreshMarker, RepositionMarker, ResizeMarker,
-    RetryFrontSwitch, SpawnWindowTrigger, Timeout, VerifyWindowPosition,
+    RetryFrontSwitch, SpawnWindowTrigger, Timeout, VerifyResize, VerifyWindowPosition,
 };
 
 use crate::config::{Config, decorations::BorderRadiusOption};
@@ -30,7 +30,8 @@ use crate::ecs::params::{ActiveDisplay, FrameActivity, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, BruteforceWindows, FlashMessage, FocusedMarker, Initializing,
     LowPowerMode, MissionControlActive, Position, ReadDisplayProperties, RestoreWindowState,
-    Scrolling, SendMessageTrigger, SpawnCommandsExt, Unmanaged, WidthRatio, WindowProperties,
+    Scrolling, SendMessageTrigger, SpawnCommandsExt, SystemTheme, Unmanaged, WidthRatio,
+    WindowProperties,
 };
 use crate::events::{Event, InputEvent};
 use crate::manager::{
@@ -675,8 +676,44 @@ pub(super) fn animate_resize_entities(
             bounds.0 = new_size;
             if finished && let Ok(mut entity_commands) = commands.get_entity(entity) {
                 entity_commands.try_remove::<ResizeMarker>();
+                entity_commands.try_insert(VerifyResize(VERIFY_RESIZE_ATTEMPTS));
             }
         });
+}
+
+/// How many times [`verify_window_size`] re-applies a size the app ignored.
+const VERIFY_RESIZE_ATTEMPTS: u8 = 3;
+
+/// After an animated resize, re-reads the window's real size and applies the
+/// wanted one again if the app did not take it, a few times at most.
+#[instrument(level = Level::DEBUG, skip_all)]
+pub(super) fn verify_window_size(
+    windows: Populated<(Entity, &mut Window, &Bounds, &mut VerifyResize), Without<ResizeMarker>>,
+    mut commands: Commands,
+) {
+    for (entity, mut window, Bounds(want), mut verify) in windows {
+        if let Ok(frame) = window.update_frame() {
+            let got = frame.size();
+            if got.chebyshev_distance(*want) <= 1 {
+                if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                    entity_commands.try_remove::<VerifyResize>();
+                }
+                continue;
+            }
+            debug!(
+                "window {} is {got} after resizing to {want}, applying it again",
+                window.id()
+            );
+            window.resize(*want);
+        }
+        let remaining = verify.0;
+        verify.0 = remaining.saturating_sub(1);
+        if remaining < 2
+            && let Ok(mut entity_commands) = commands.get_entity(entity)
+        {
+            entity_commands.try_remove::<VerifyResize>();
+        }
+    }
 }
 
 /// Republishes the pointer and gesture events onto [`InputEvent`], so the input
@@ -1160,9 +1197,10 @@ pub(super) fn commit_window_size(
         });
 }
 
-/// Restores user-visible window state before Paneru shuts down: clears any
-/// brightness dim, removes the dim/border overlay window, and centers every
-/// managed window on the display its frame center falls in.
+/// Restores user-visible window state before the engine shuts down: clears any
+/// brightness dim, removes the dim/border overlay window, and brings windows
+/// left (partly) off screen back onto a display. Windows already fully on a
+/// display and fullscreen windows are left alone.
 pub(super) fn cleanup_on_exit(
     mut exit_events: MessageReader<AppExit>,
     mut all_windows: Query<&mut Window>,
@@ -1172,7 +1210,7 @@ pub(super) fn cleanup_on_exit(
 ) {
     for _ in exit_events.read() {
         let ids = all_windows.iter().map(|w| w.id()).collect::<Vec<_>>();
-        info!("exit cleanup: restoring {} window(s)", ids.len());
+        info!("exit cleanup: releasing {} window(s)", ids.len());
         window_manager.dim_windows(&ids, 0.0);
 
         if let Some(ref mut overlay_mgr) = overlay_mgr {
@@ -1184,43 +1222,103 @@ pub(super) fn cleanup_on_exit(
             return;
         }
 
+        let mut cascade = vec![0; display_bounds.len()];
         for mut window in &mut all_windows {
-            let frame = window.frame();
-            let center = frame.center();
-            let bounds = display_bounds
-                .iter()
-                .find(|b| {
-                    center.x >= b.min.x
-                        && center.x <= b.max.x
-                        && center.y >= b.min.y
-                        && center.y <= b.max.y
-                })
-                .copied()
-                .unwrap_or(display_bounds[0]);
-
-            let mut size = frame.size();
-            if size.x > bounds.width() || size.y > bounds.height() {
-                let new_size = bevy::math::IVec2::new(
-                    size.x.min(bounds.width() * 9 / 10),
-                    size.y.min(bounds.height() * 9 / 10),
-                );
-                window.resize(new_size);
-                size = new_size;
+            if window.is_full_screen() {
+                continue;
             }
-
-            let origin = bevy::math::IVec2::new(
-                bounds.min.x + (bounds.width() - size.x) / 2,
-                bounds.min.y + (bounds.height() - size.y) / 2,
-            );
+            let frame = window.frame();
+            let Some((display_index, target)) =
+                exit_placement(frame, &display_bounds, &mut cascade)
+            else {
+                continue;
+            };
             info!(
-                "exit cleanup: window {} -> origin {:?}, size {:?}",
-                window.id(),
-                origin,
-                size
+                "exit cleanup: window {} on display #{display_index}: {frame:?} -> {target:?}",
+                window.id()
             );
-            window.reposition(origin);
+            if target.size() != frame.size() {
+                window.resize(target.size());
+            }
+            window.reposition(target.min);
         }
     }
+}
+
+/// Whether any decoration needs the overlay windows: a dim colour or an
+/// active window border.
+pub(crate) fn overlay_decorations_enabled(config: Option<Res<Config>>) -> bool {
+    config.is_some_and(|config| config.has_dim_inactive_color() || config.border_active_window())
+}
+
+/// Drops the overlay windows once a config reload turned every decoration
+/// off; `update_overlays` no longer runs then and would leave them stale.
+pub(super) fn release_disabled_overlays(overlays: Option<NonSendMut<OverlayManager>>) {
+    let Some(mut overlays) = overlays else {
+        return;
+    };
+    if overlays.is_empty() {
+        return;
+    }
+    debug!("decorations are off; removing the overlay windows");
+    overlays.remove_all();
+}
+
+/// Spacing of the diagonal cascade [`exit_placement`] lays windows out in.
+const EXIT_CASCADE_STEP: i32 = 30;
+
+fn contains_rect(outer: IRect, inner: IRect) -> bool {
+    outer.min.cmple(inner.min).all() && inner.max.cmple(outer.max).all()
+}
+
+/// Where exit cleanup puts a window with `frame`, and on which display:
+/// `None` when it already sits fully inside one. Otherwise the display it
+/// overlaps most (ties go to the nearest centre), shrunk to 90% if it does
+/// not fit, and centred with a per-display diagonal cascade so released
+/// windows do not land exactly on top of each other.
+fn exit_placement(frame: IRect, displays: &[IRect], cascade: &mut [i32]) -> Option<(usize, IRect)> {
+    if displays
+        .iter()
+        .any(|display| contains_rect(*display, frame))
+    {
+        return None;
+    }
+    let overlap = |display: &IRect| {
+        let common = display.intersect(frame);
+        if common.is_empty() {
+            0
+        } else {
+            i64::from(common.width()) * i64::from(common.height())
+        }
+    };
+    let distance = |display: &IRect| (display.center() - frame.center()).abs().element_sum();
+    let index = displays
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| {
+            overlap(a)
+                .cmp(&overlap(b))
+                .then_with(|| distance(b).cmp(&distance(a)))
+        })
+        .map(|(index, _)| index)?;
+    let display = displays[index];
+
+    let mut size = frame.size();
+    if size.x > display.width() || size.y > display.height() {
+        size.x = size.x.min(display.width() * 9 / 10);
+        size.y = size.y.min(display.height() * 9 / 10);
+    }
+    let step = cascade[index];
+    cascade[index] += 1;
+    let free = display.size() - size;
+    let slack = free.min_element();
+    let offset = if slack >= 1 {
+        (step % (slack / EXIT_CASCADE_STEP + 1)) * EXIT_CASCADE_STEP - slack / 2
+    } else {
+        0
+    };
+    let origin = (display.min + free / 2 + offset).clamp(display.min, display.max - size);
+    Some((index, IRect::from_corners(origin, origin + size)))
 }
 
 pub(crate) fn update_flash_messages(
@@ -1336,9 +1434,141 @@ type SettledWindows<'w, 's> = Query<
 /// from its accessibility list while the window server still calls that tab on
 /// screen. Ghostty does the latter. An empty accessibility list is an app that
 /// did not answer, not an app showing nothing.
-fn app_shows_window(ax_window_ids: &[WinID], on_screen: &[WinID], window_id: WinID) -> bool {
+pub(crate) fn app_shows_window(
+    ax_window_ids: &[WinID],
+    on_screen: &[WinID],
+    window_id: WinID,
+) -> bool {
     on_screen.contains(&window_id)
         && (ax_window_ids.is_empty() || ax_window_ids.contains(&window_id))
+}
+
+/// Re-applies native dimming when a config reload changes the dim level.
+/// The first run only records the level; theme changes are handled by
+/// `theme_change_trigger`.
+#[allow(
+    clippy::option_option,
+    reason = "the applied level is: not yet seen, dimming off, or a level"
+)]
+pub(crate) fn sync_native_dim(
+    windows: Windows,
+    window_manager: Res<WindowManager>,
+    config: Option<Res<Config>>,
+    theme: Option<Res<SystemTheme>>,
+    mut applied: Local<Option<Option<f32>>>,
+) {
+    let Some(config) = config else {
+        return;
+    };
+    let level = config.window_dim_ratio(theme.is_some_and(|theme| theme.is_dark));
+    let Some(previous) = applied.replace(level) else {
+        return;
+    };
+    if previous == level {
+        return;
+    }
+    let focused = windows.focused().map(|(window, _)| window.id());
+    let (ids, value) = match level {
+        Some(value) => (
+            windows
+                .iter()
+                .map(|(window, _)| window.id())
+                .filter(|id| Some(*id) != focused)
+                .collect::<Vec<_>>(),
+            value,
+        ),
+        // Dimming turned off: undim everything.
+        None => (windows.iter().map(|(window, _)| window.id()).collect(), 0.0),
+    };
+    debug!(
+        "native dim level changed to {value}; applying it to {} window(s)",
+        ids.len()
+    );
+    if !ids.is_empty() {
+        window_manager.dim_windows(&ids, value);
+    }
+}
+
+/// Two same-app windows whose sizes differ by less than this (on either axis)
+/// may be tabs of one group.
+const TAB_SIZE_TOLERANCE: u32 = 5;
+/// ...and they share a frame when their origins are at most this far apart.
+const TAB_ORIGIN_TOLERANCE: u32 = 4;
+
+/// How a stray tab was matched to the tab that is showing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TabMatch {
+    /// Same app, same size and same origin.
+    Frame,
+    /// Same app and size, and the only such window showing.
+    Size,
+}
+
+/// What [`stray_native_tabs`] needs to know about a window.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TabProbe {
+    pub entity: Entity,
+    pub app: Entity,
+    pub frame: IRect,
+    /// See [`app_shows_window`].
+    pub showing: bool,
+}
+
+/// Background tabs sitting in a column of their own, each paired with the
+/// showing tab whose column it belongs in.
+pub(crate) fn stray_native_tabs(
+    strip: &LayoutStrip,
+    probes: &[TabProbe],
+) -> Vec<(Entity, Entity, TabMatch)> {
+    strip
+        .columns()
+        .filter_map(|column| match column {
+            Column::Single(entity) => Some(*entity),
+            Column::Stack(_) | Column::Tabs(_) | Column::Fullscren(_) => None,
+        })
+        .filter_map(|stray| {
+            let probe = probes
+                .iter()
+                .find(|probe| probe.entity == stray && !probe.showing)?;
+            let candidates = probes
+                .iter()
+                .filter(|candidate| {
+                    candidate.showing
+                        && candidate.entity != stray
+                        && candidate.app == probe.app
+                        && candidate
+                            .frame
+                            .size()
+                            .chebyshev_distance(probe.frame.size())
+                            < TAB_SIZE_TOLERANCE
+                })
+                .collect::<Vec<_>>();
+            if let Some(leader) = candidates.iter().find(|candidate| {
+                candidate.frame.min.chebyshev_distance(probe.frame.min) <= TAB_ORIGIN_TOLERANCE
+            }) {
+                Some((stray, leader.entity, TabMatch::Frame))
+            } else if let [leader] = candidates.as_slice() {
+                Some((stray, leader.entity, TabMatch::Size))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Folds `follower` into the column of `leader` as a native tab, keeping the
+/// leader as the visible head of the group.
+pub(crate) fn fold_native_tab(strip: &mut LayoutStrip, leader: Entity, follower: Entity) -> bool {
+    if let Err(err) = strip.convert_to_tabs(leader, follower) {
+        error!("Failed to convert to tabs: {err}");
+        return false;
+    }
+    if let Ok(index) = strip.index_of(leader)
+        && let Some(column) = strip.get_column_mut(index)
+    {
+        column.move_to_front(leader);
+    }
+    true
 }
 
 /// Folds a background native tab that ended up in a column of its own back into
@@ -1354,13 +1584,14 @@ fn app_shows_window(ax_window_ids: &[WinID], on_screen: &[WinID], window_id: Win
 /// only when they share a column, which is what this is repairing, and
 /// [`app_shows_window`] is what tells a background tab from a window the user
 /// can see.
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 pub(crate) fn regroup_stray_native_tabs(
     windows: SettledWindows,
     apps: Query<&Application>,
     mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     window_manager: Res<WindowManager>,
     mission_control: Res<MissionControlActive>,
+    mut pending: Local<HashSet<(Entity, Entity)>>,
     mut commands: Commands,
 ) {
     if mission_control.0 {
@@ -1376,78 +1607,145 @@ pub(crate) fn regroup_stray_native_tabs(
         return;
     };
 
-    // Column tops only: a window sharing a column is already grouped, and
-    // stacked siblings never share a frame.
-    let tops = strip.all_columns();
-    // Only a column of its own can be a stray: pulling a window out of a stack
-    // or an existing tab group would break a grouping the user set up.
-    let strays = strip
-        .columns()
-        .filter_map(|column| match column {
-            Column::Single(entity) => Some(*entity),
-            Column::Stack(_) | Column::Tabs(_) | Column::Fullscren(_) => None,
-        })
-        .collect::<Vec<_>>();
     // One accessibility round trip per app, not per window: this runs on a timer
     // and the call crosses into the app.
     let mut ax_windows: EntityHashMap<Vec<WinID>> = EntityHashMap::default();
-    let columns = tops
+    let probes = strip
+        .all_windows()
         .into_iter()
         .filter_map(|entity| windows.get(entity).ok())
-        .map(
-            |(entity, window, Position(position), Bounds(bounds), child)| {
-                let app = child.parent();
-                let ax_window_ids = ax_windows.entry(app).or_insert_with(|| {
-                    apps.get(app)
-                        .map(|app| app.ax_window_ids())
-                        .unwrap_or_default()
-                });
-                (
-                    entity,
-                    app_shows_window(ax_window_ids, &on_screen, window.id()),
-                    *position,
-                    *bounds,
-                    app,
-                )
-            },
-        )
+        .map(|(entity, window, position, bounds, child)| {
+            let app = child.parent();
+            let ax_window_ids = ax_windows.entry(app).or_insert_with(|| {
+                apps.get(app)
+                    .map(|app| app.ax_window_ids())
+                    .unwrap_or_default()
+            });
+            TabProbe {
+                entity,
+                app,
+                frame: IRect::from_corners(position.0, position.0 + bounds.0),
+                showing: app_shows_window(ax_window_ids, &on_screen, window.id()),
+            }
+        })
         .collect::<Vec<_>>();
 
+    // A match on size alone is weaker evidence than a shared frame, so it has
+    // to be seen on two consecutive runs before it folds.
+    let mut next = HashSet::new();
     let mut regrouped = Vec::new();
-    for (hidden, showing, position, bounds, app) in &columns {
-        if *showing || regrouped.contains(hidden) || !strays.contains(hidden) {
+    for (stray, leader, matched) in stray_native_tabs(&strip, &probes) {
+        if matched == TabMatch::Size && !pending.contains(&(stray, leader)) {
+            next.insert((stray, leader));
             continue;
         }
-        let Some((leader, ..)) = columns.iter().find(
-            |(
-                candidate,
-                candidate_showing,
-                candidate_position,
-                candidate_bounds,
-                candidate_app,
-            )| {
-                *candidate_showing
-                    && candidate != hidden
-                    && candidate_app == app
-                    && candidate_position.chebyshev_distance(*position) <= 1
-                    && candidate_bounds.chebyshev_distance(*bounds) <= 1
-            },
-        ) else {
-            continue;
-        };
-
-        debug!("stray native tab {hidden} folded into the column of {leader}");
-        if strip
-            .convert_to_tabs(*leader, *hidden)
-            .inspect_err(|err| error!("Failed to convert to tabs: {err}"))
-            .is_ok()
-        {
-            regrouped.push(*hidden);
+        debug!("stray native tab {stray} folded into the column of {leader} ({matched:?})");
+        if fold_native_tab(&mut strip, leader, stray) {
+            regrouped.push(leader);
         }
     }
+    *pending = next;
 
     if let Some(leader) = regrouped.first() {
         commands.reshuffle_around(*leader);
+    }
+}
+
+/// When a native tab switch brings up a window that sits in a column of its
+/// own, folds it into the column of the hidden tab it replaced.
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn fold_tab_switch_on_focus(
+    focused: Single<Entity, Added<FocusedMarker>>,
+    mut windows: Query<(&mut Window, &Position, &Bounds, &ChildOf), Without<Unmanaged>>,
+    apps: Query<&Application>,
+    mut strips: Query<&mut LayoutStrip, With<ActiveWorkspaceMarker>>,
+    window_manager: Res<WindowManager>,
+    mission_control: Res<MissionControlActive>,
+    mut commands: Commands,
+) {
+    if mission_control.0 {
+        return;
+    }
+    let focused = *focused;
+    let Some(mut strip) = strips.iter_mut().find(|strip| strip.contains(focused)) else {
+        return;
+    };
+    if !strip
+        .index_of(focused)
+        .and_then(|index| strip.get(index))
+        .is_ok_and(|column| matches!(column, Column::Single(_)))
+    {
+        return;
+    }
+    let Ok((mut window, position, bounds, child)) = windows.get_mut(focused) else {
+        return;
+    };
+    let app = child.parent();
+    let frame = window
+        .update_frame()
+        .unwrap_or_else(|_| IRect::from_corners(position.0, position.0 + bounds.0));
+    let window_id = window.id();
+    let Some(on_screen) = window_manager.windows_on_screen() else {
+        return;
+    };
+    let ax_window_ids = apps
+        .get(app)
+        .map(|app| app.ax_window_ids())
+        .unwrap_or_default();
+    if !app_shows_window(&ax_window_ids, &on_screen, window_id) {
+        return;
+    }
+
+    let probes = strip
+        .all_windows()
+        .into_iter()
+        .filter(|&entity| entity != focused)
+        .filter_map(|entity| {
+            let (window, position, bounds, child) = windows.get(entity).ok()?;
+            (child.parent() == app).then(|| TabProbe {
+                entity,
+                app,
+                frame: IRect::from_corners(position.0, position.0 + bounds.0),
+                showing: app_shows_window(&ax_window_ids, &on_screen, window.id()),
+            })
+        })
+        .filter(|probe| probe.frame.size().chebyshev_distance(frame.size()) < TAB_SIZE_TOLERANCE)
+        .collect::<Vec<_>>();
+    let any_showing = probes.iter().any(|probe| probe.showing);
+    let shown = |entity: Entity| {
+        probes
+            .iter()
+            .find(|probe| probe.entity == entity)
+            .is_some_and(|probe| probe.showing)
+    };
+    // Hidden candidates whose whole tab group is hidden too.
+    let hidden = probes
+        .iter()
+        .filter(|probe| {
+            !probe.showing
+                && strip
+                    .tab_group(probe.entity)
+                    .unwrap_or_else(|| vec![probe.entity])
+                    .into_iter()
+                    .all(|entity| !shown(entity))
+        })
+        .collect::<Vec<_>>();
+    let Some(target) = hidden
+        .iter()
+        .find(|probe| probe.frame.min.chebyshev_distance(frame.min) <= TAB_ORIGIN_TOLERANCE)
+        .or_else(|| (hidden.len() == 1 && !any_showing).then(|| &hidden[0]))
+        .map(|probe| probe.entity)
+    else {
+        return;
+    };
+
+    debug!("tab switch: {focused} shown in place of {target}; joining its column");
+    if strip
+        .convert_to_tabs(target, focused)
+        .inspect_err(|err| error!("Failed to convert to tabs: {err}"))
+        .is_ok()
+    {
+        commands.reshuffle_around(target);
     }
 }
 
@@ -1631,5 +1929,80 @@ mod tests {
         app.update();
 
         assert_eq!(tap_config.swipe_gesture_fingers(), Some(3));
+    }
+}
+
+#[cfg(test)]
+mod fork_tests {
+    use super::*;
+    use bevy::math::IVec2;
+
+    #[test]
+    fn visible_windows_stay_and_others_cascade() {
+        let displays = [IRect::new(0, 0, 1000, 800), IRect::new(1000, 0, 2000, 800)];
+        let mut cascade = vec![0; displays.len()];
+        // Fully on a display: untouched.
+        assert_eq!(
+            exit_placement(IRect::new(10, 10, 410, 410), &displays, &mut cascade),
+            None
+        );
+        // Mostly on the second display: centred there, then cascaded.
+        let frame = IRect::new(900, 100, 1300, 500);
+        let first = exit_placement(frame, &displays, &mut cascade).unwrap();
+        let second = exit_placement(frame, &displays, &mut cascade).unwrap();
+        assert_eq!(first.0, 1);
+        assert_eq!(first.1.size(), frame.size());
+        assert_eq!(second.1.min - first.1.min, IVec2::splat(EXIT_CASCADE_STEP));
+        assert!(contains_rect(displays[1], first.1) && contains_rect(displays[1], second.1));
+        // Too big: shrunk to 90% of the display it overlaps most.
+        let (index, big) =
+            exit_placement(IRect::new(-100, -100, 1200, 900), &displays, &mut cascade).unwrap();
+        assert_eq!(index, 0);
+        assert_eq!(big.size(), IVec2::new(900, 720));
+    }
+
+    #[test]
+    fn stray_tabs_match_by_frame_then_unique_size() {
+        let mut world = bevy::ecs::world::World::new();
+        let e = (0..5).map(|_| world.spawn_empty().id()).collect::<Vec<_>>();
+        let (app, other_app) = (e[3], e[4]);
+        let mut strip = LayoutStrip::default();
+        for &entity in &e[..3] {
+            strip.append(entity);
+        }
+        let probe = |entity, app, x, showing| TabProbe {
+            entity,
+            app,
+            frame: IRect::new(x, 20, x + 400, 720),
+            showing,
+        };
+
+        // A hidden window 4 px off a showing sibling's frame: same group.
+        let probes = [probe(e[0], app, 0, true), probe(e[1], app, 4, false)];
+        assert_eq!(
+            stray_native_tabs(&strip, &probes),
+            vec![(e[1], e[0], TabMatch::Frame)]
+        );
+
+        // Elsewhere, but the only showing window of that size: a size match.
+        let probes = [probe(e[0], app, 0, true), probe(e[1], app, 800, false)];
+        assert_eq!(
+            stray_native_tabs(&strip, &probes),
+            vec![(e[1], e[0], TabMatch::Size)]
+        );
+
+        // Two showing candidates and no frame match, or another app: nothing.
+        let probes = [
+            probe(e[0], app, 0, true),
+            probe(e[1], app, 800, false),
+            probe(e[2], app, 400, true),
+        ];
+        assert_eq!(stray_native_tabs(&strip, &probes), vec![]);
+        let probes = [probe(e[0], other_app, 0, true), probe(e[1], app, 0, false)];
+        assert_eq!(stray_native_tabs(&strip, &probes), vec![]);
+
+        // Folding keeps the leader in front.
+        assert!(fold_native_tab(&mut strip, e[0], e[1]));
+        assert_eq!(strip.tab_group(e[0]), Some(vec![e[0], e[1]]));
     }
 }

@@ -1,3 +1,28 @@
+> **NOTICE: slat-engine is a fork of [Paneru](https://github.com/karinushka/paneru)**
+> (MIT, Copyright (c) 2025 Karinushka@github) maintained as the window engine
+> of [Slat](https://github.com/dyascj/slat). The binary is `slat-engine`, its
+> Mach service and launchd label are `io.github.dyascj.slat.engine`. Everything
+> below is the upstream Paneru documentation; on top of it the fork adds:
+>
+> - **Canvas layout:** `[options] layout = "canvas"` (default `"columns"`,
+>   hot-reloadable). Windows keep their own size and a free position on the
+>   strip, drags are remembered, swaps exchange horizontal slots, and the
+>   layout is saved to `$XDG_STATE_HOME/paneru/canvas.json`. Column-only
+>   commands (balance, center, stack, tabbed display, equalize, resize,
+>   vertical resize, fullwidth) are ignored in this mode.
+> - **Directional stacking:** `window stack east` and `window unstack west`
+>   (bindings `window_stack_east`, `window_unstack_west`, Lua
+>   `paneru.window.stack_east` / `paneru.window.unstack_west`).
+> - **Embedded mode** (`SLAT_EMBEDDED=1`): logs to
+>   `~/Library/Logs/Slat/engine.log`, requires `$PANERU_CONFIG`, hides the menu
+>   bar item, waits silently for Accessibility, and leaves service management
+>   to the host app.
+> - Smaller fixes: rule precedence by specificity, a strip that empties on
+>   screen slides back into view, sturdier native tab grouping, dim level
+>   re-applied on config reload, overlays released when decorations are off,
+>   size re-verified after animated resizes, and a gentler exit cleanup that
+>   leaves visible windows alone.
+
 <div align="center">
   <img src="./images/paneru.png" alt="Paneru" width="600"/>
 </div>
@@ -259,7 +284,7 @@ $ paneru
 
 Paneru exposes a `send-cmd` subcommand that lets you control the running
 instance from the command line over a Mach service
-(`com.github.karinushka.paneru`). Any
+(`io.github.dyascj.slat.engine`). Any
 command that can be bound to a hotkey can also be sent programmatically:
 
 ```shell

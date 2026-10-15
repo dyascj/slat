@@ -9,7 +9,7 @@ use bevy::ecs::resource::Resource;
 use bevy::ecs::system::{Commands, Query, Res, ResMut};
 use bevy::time::{Time, Timer, TimerMode, Virtual};
 use objc2_core_graphics::CGDirectDisplayID;
-use tracing::{Level, info, instrument, warn};
+use tracing::{Level, debug, info, instrument, warn};
 
 use crate::config::{Config, MissingWindowBehavior};
 use crate::ecs::layout::{LayoutStrip, PARKED_STRIP_SLIVER};
@@ -17,11 +17,12 @@ use crate::ecs::params::{WindowCtx, Windows};
 use crate::ecs::state::{
     PaneruState, SavedColumn, SavedStackItem, SavedStrip, SavedWindow, SavedWorkspace,
 };
+use crate::ecs::systems::{TabProbe, app_shows_window, fold_native_tab, stray_native_tabs};
 use crate::ecs::workspace::{PreviousStripPosition, RestoredActivation};
 use crate::ecs::{
     ActiveDisplayMarker, ActiveWorkspaceMarker, RestoreWindowState, SpawnCommandsExt, Unmanaged,
 };
-use crate::manager::{Application, Display, Window};
+use crate::manager::{Application, Display, Window, WindowManager};
 use crate::platform::{Pid, WinID, WorkspaceId};
 
 #[derive(Debug, Resource)]
@@ -395,7 +396,7 @@ pub(crate) fn matches_startup_restore_state(
     saved_windows_in_state(state).any(|saved| saved.hard_match(window.id(), pid, &bundle_id))
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 pub(super) fn restore_window_state(
     _: On<RestoreWindowState>,
@@ -409,6 +410,7 @@ pub(super) fn restore_window_state(
     apps: Query<&Application>,
     session: Option<Res<SessionRestore>>,
     restoration: Option<Res<PaneruState>>,
+    window_manager: Res<WindowManager>,
     mut ctx: WindowCtx,
 ) {
     let restoration = if let Some(session) = session.as_deref() {
@@ -433,7 +435,12 @@ pub(super) fn restore_window_state(
     };
 
     let current = current_window_identities(&ctx.windows, &apps, restoration);
-    let plan = RestorePlanner::new(restoration).plan(&current);
+    let mut plan = RestorePlanner::new(restoration).plan(&current);
+    let live_workspaces = workspaces
+        .iter()
+        .map(|(_, strip, _, _)| strip.id())
+        .collect::<HashSet<_>>();
+    drop_dead_workspaces(&mut plan, &live_workspaces);
 
     if plan.consumed_entities.is_empty() {
         info!(
@@ -523,6 +530,10 @@ pub(super) fn restore_window_state(
             }
         }
 
+        if ctx.config.native_tabs_enabled() && !strip.is_fullscreen() {
+            compact_native_tabs(&mut strip, &ctx.windows, &apps, &window_manager);
+        }
+
         let is_active = plan
             .active_virtual_by_workspace
             .get(&planned.workspace_id)
@@ -568,6 +579,60 @@ pub(super) fn restore_window_state(
         plan.ignored_missing_windows,
         plan.skipped_ambiguous_matches
     );
+}
+
+/// Drops planned rows of spaces that no longer exist. Their windows are not
+/// consumed, so they stay wherever they are now.
+fn drop_dead_workspaces(plan: &mut RestorePlan, live: &HashSet<WorkspaceId>) {
+    let (keep, dead): (Vec<_>, Vec<_>) = std::mem::take(&mut plan.strips)
+        .into_iter()
+        .partition(|planned| live.contains(&planned.workspace_id));
+    for planned in dead {
+        info!(
+            "Session restore skipping workspace {} virtual {}: the space no longer exists",
+            planned.workspace_id, planned.virtual_index
+        );
+        for entity in layout_strip_from_plan(&planned).all_windows() {
+            plan.consumed_entities.remove(&entity);
+        }
+        plan.active_virtual_by_workspace
+            .remove(&planned.workspace_id);
+    }
+    plan.strips = keep;
+}
+
+/// Folds background native tabs that the saved layout put in columns of
+/// their own back into the column of the tab that is showing.
+fn compact_native_tabs(
+    strip: &mut LayoutStrip,
+    windows: &Windows,
+    apps: &Query<&Application>,
+    window_manager: &WindowManager,
+) {
+    let Some(on_screen) = window_manager.windows_on_screen() else {
+        return;
+    };
+    let probes = strip
+        .all_windows()
+        .into_iter()
+        .filter_map(|entity| {
+            let (window, _, parent) = windows.find_parent(windows.get(entity)?.id())?;
+            let ax_window_ids = apps
+                .get(parent)
+                .map(|app| app.ax_window_ids())
+                .unwrap_or_default();
+            Some(TabProbe {
+                entity,
+                app: parent,
+                frame: windows.frame(entity)?,
+                showing: app_shows_window(&ax_window_ids, &on_screen, window.id()),
+            })
+        })
+        .collect::<Vec<_>>();
+    for (stray, leader, matched) in stray_native_tabs(strip, &probes) {
+        debug!("session restore: native tab {stray} joins the column of {leader} ({matched:?})");
+        fold_native_tab(strip, leader, stray);
+    }
 }
 
 fn layout_strip_from_plan(planned: &PlannedStrip) -> LayoutStrip {
@@ -697,6 +762,9 @@ fn apply_planned_columns(strip: &mut LayoutStrip, columns: &[PlannedColumn]) {
 
 fn append_tabs(strip: &mut LayoutStrip, entities: &[Entity]) -> Option<Entity> {
     let leader = *entities.first()?;
+    if strip.contains(leader) {
+        return None;
+    }
     strip.append(leader);
     for follower in &entities[1..] {
         _ = strip.convert_to_tabs(leader, *follower);
@@ -707,19 +775,24 @@ fn append_tabs(strip: &mut LayoutStrip, entities: &[Entity]) -> Option<Entity> {
 fn append_stack(strip: &mut LayoutStrip, items: &[PlannedStackItem]) {
     let mut first = true;
     for item in items {
-        let Some(leader) = append_stack_item(strip, item) else {
+        if append_stack_item(strip, item).is_none() {
             continue;
-        };
+        }
         if first {
             first = false;
         } else {
-            _ = strip.stack(leader);
+            // The item just became the last column; fold it into the stack
+            // being built right before it.
+            let index = strip.len() - 1;
+            strip.merge_column_into(index, index - 1);
         }
     }
 }
 
 fn append_stack_item(strip: &mut LayoutStrip, item: &PlannedStackItem) -> Option<Entity> {
     match item {
+        // A window the plan already placed is not placed twice.
+        PlannedStackItem::Single(entity) if strip.contains(*entity) => None,
         PlannedStackItem::Single(entity) => {
             strip.append(*entity);
             Some(*entity)

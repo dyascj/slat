@@ -41,6 +41,7 @@ General behavior settings for the window manager.
 | `virtual_workspace_animations` | Boolean | `false` | If enabled, Paneru will animate virtual workspace swaps. Off by default, because people use virtual workspaces due to the slow animation of the native macOS workspaces. |
 | `insert_windows_mid_strip` | Boolean | `false` | When moving a window to another virtual workspace, insert it at the column matching its current on-screen position (keeping it where you see it and shifting the rest) instead of appending it to the end of the destination strip. |
 | `create_virtual_workspace_automatically` | Boolean | `false` | Automatically creates a new virtual workspace when using `window_virtual_south `or Southward gesture controls. |
+| `layout` | String | `"columns"` | `"columns"` packs windows into scrolling columns. `"canvas"` lets every window keep its own size and a free position on the strip: new windows open next to their neighbours, dragging a window moves it, swapping left/right trades horizontal slots, and the layout is saved to `$XDG_STATE_HOME/paneru/canvas.json`. Column-only commands (balance, center, stack/unstack, tabbed display, equalize, resize, vertical resize, fullwidth) are ignored in Canvas mode. Switching takes effect on config reload. |
 
 ---
 
@@ -204,6 +205,10 @@ https://github.com/karinushka/paneru/blob/3790b01f8d65df5d9000142db7cf25f9270dcc
 | `window_manage` | Toggle between tiled and floating state. |
 | `window_stack` | Stack the current window into the column on the left. |
 | `window_unstack` | Pull a window out of a stack into its own column. |
+| `window_stack_west` | Same as `window_stack`. |
+| `window_stack_east` | Stack the current window into the column on the right. |
+| `window_unstack_east` | Same as `window_unstack`: the window lands right of its stack. |
+| `window_unstack_west` | Pull a window out of a stack into its own column, left of the stack. |
 | `window_tabbeddisplay` | Toggle the focused stack between a normal split display and a tabbed display (one window visible at a time, sharing the full column). Cycle tabs with `window_focus_north`/`window_focus_south`. |
 | `window_equalize` | Make all windows in a stack equal height. |
 | `window_balance` | Make all columns in the strip the same width as the focused window. |

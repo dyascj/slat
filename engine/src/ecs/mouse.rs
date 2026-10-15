@@ -10,6 +10,9 @@ use tracing::{debug, trace, warn};
 
 use super::{MouseHeldMarker, Timeout};
 use crate::config::Config;
+use crate::ecs::canvas::{
+    CanvasDragSettle, CanvasDragStart, DRAG_SETTLE, DRAG_THRESHOLD, DeskPosition,
+};
 use crate::ecs::focus::PendingFocusLayout;
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{GlobalState, Windows};
@@ -263,22 +266,34 @@ fn mouse_down_trigger(
             }
         }
 
-        if config.window_hidden_ratio() >= 1.0 {
-            // At max hidden ratio, never reshuffle on click.
-        } else {
+        // At max hidden ratio, never reshuffle on click. Canvas mode still
+        // tracks the press, to tell a drag from a click on mouse-up.
+        if config.window_hidden_ratio() < 1.0 || config.canvas() {
             // Defer reshuffle until mouse-up so the window doesn't shift
             // mid-click. The Timeout auto-despawns if mouse-up is lost.
             let timeout = Timeout::new(Duration::from_secs(5), None, &mut commands);
-            commands.spawn((MouseHeldMarker(entity), timeout));
+            let held = commands.spawn((MouseHeldMarker(entity), timeout)).id();
+            if config.canvas()
+                && let Some(origin) = windows.origin(entity)
+            {
+                commands.entity(held).insert(CanvasDragStart(origin));
+            }
         }
     }
 }
 
 /// Handles mouse-up events. Triggers the deferred reshuffle so the clicked
 /// window slides into view after the user releases the button.
+///
+/// In Canvas mode a press that moved the window by more than
+/// [`DRAG_THRESHOLD`] is a drag: the window's new spot becomes its desk
+/// position instead of being reshuffled back.
 fn mouse_up_trigger(
     mut messages: MessageReader<InputEvent>,
-    mouse_held: Query<(Entity, &MouseHeldMarker)>,
+    mouse_held: Query<(Entity, &MouseHeldMarker, Option<&CanvasDragStart>)>,
+    windows: Windows,
+    strips: Query<(Entity, &LayoutStrip, &Position)>,
+    config: Res<Config>,
     mut commands: Commands,
 ) {
     for InputEvent(event) in messages.read() {
@@ -286,8 +301,35 @@ fn mouse_up_trigger(
             continue;
         }
 
-        for (held_entity, marker) in &mouse_held {
-            commands.reshuffle_around(marker.0);
+        for (held_entity, marker, drag_start) in &mouse_held {
+            let window = marker.0;
+            let mut dragged = false;
+            if let Some(start) = drag_start
+                && config.canvas()
+                && let Some(window_pos) = windows.origin(window)
+                && let Some((strip_entity, _, strip_pos)) =
+                    strips.iter().find(|(_, strip, _)| strip.contains(window))
+            {
+                let moved = (window_pos - start.0).abs();
+                if moved.x > DRAG_THRESHOLD || moved.y > DRAG_THRESHOLD {
+                    let desk = window_pos - strip_pos.0;
+                    debug!("canvas: {window} dragged to desk {desk}");
+                    if let Ok(mut entity_commands) = commands.get_entity(window) {
+                        entity_commands.try_insert((
+                            DeskPosition {
+                                strip: strip_entity,
+                                pos: desk,
+                            },
+                            CanvasDragSettle,
+                            Timeout::for_component::<CanvasDragSettle>(DRAG_SETTLE),
+                        ));
+                    }
+                    dragged = true;
+                }
+            }
+            if !dragged && (!config.canvas() || config.window_hidden_ratio() < 1.0) {
+                commands.reshuffle_around(window);
+            }
             if let Ok(mut entity_commands) = commands.get_entity(held_entity) {
                 entity_commands.try_despawn();
             }

@@ -15,6 +15,7 @@ mod query;
 
 use crate::config::Config;
 use crate::config::snippet::{RuleSubject, SnippetDialect, window_rule_snippet};
+use crate::ecs::canvas::{DeskPosition, canvas_blocks};
 use crate::ecs::display::FloatingLayer;
 use crate::ecs::focus::FocusHistory;
 use crate::ecs::layout::{
@@ -604,6 +605,8 @@ fn command_swap_focus(
     mut messages: MessageReader<Event>,
     windows: Windows,
     mut active_display: ActiveDisplayMut,
+    mut desks: Query<&mut DeskPosition>,
+    config: Res<Config>,
     mut commands: Commands,
 ) {
     let Some(Operation::Swap(direction)) =
@@ -644,7 +647,15 @@ fn command_swap_focus(
     // stays put and per-window animation slides the window into the slot.
     // Only when the slot would fall off the edge does the strip scroll —
     // and only by the shortfall.
-    let swapped = handler();
+    let swapped = if config.canvas()
+        && matches!(
+            direction,
+            Direction::West | Direction::East | Direction::First | Direction::Last
+        ) {
+        canvas_swap(direction, &windows, active_strip, &mut desks)
+    } else {
+        handler()
+    };
     if let Some(window) = swapped {
         commands.ensure_visible(window);
     } else {
@@ -680,6 +691,32 @@ fn command_swap_focus(
     }
 }
 
+/// Canvas swap: the focused window and its neighbour trade horizontal desk
+/// slots. The column order follows on the next `canvas_assign_desks` re-sort.
+fn canvas_swap(
+    direction: &Direction,
+    windows: &Windows,
+    strip: &LayoutStrip,
+    desks: &mut Query<&mut DeskPosition>,
+) -> Option<Entity> {
+    let (_, current) = windows.focused()?;
+    let other = get_window_in_direction(direction, current, strip)?;
+    if other == current {
+        return None;
+    }
+    let [mut current_desk, mut other_desk] = desks.get_many_mut([current, other]).ok()?;
+    let (current_x, other_x) = crate::ecs::canvas::swap_slots(
+        current_desk.pos.x,
+        windows.size(current)?.x,
+        other_desk.pos.x,
+        windows.size(other)?.x,
+    );
+    debug!("canvas swap {direction:?}: {current} -> x {current_x}, {other} -> x {other_x}");
+    current_desk.pos.x = current_x;
+    other_desk.pos.x = other_x;
+    Some(current)
+}
+
 /// Records that the user placed this strip's offset by hand, so
 /// `reshuffle_layout_strip` keeps it instead of re-deriving one from the
 /// focused window's frame. The mark is dropped again as soon as the strip's
@@ -703,12 +740,16 @@ fn command_center_window(
     windows: Windows,
     active_display: ActiveDisplay,
     window_manager: Res<WindowManager>,
+    config: Res<Config>,
     mut commands: Commands,
 ) {
     if filter_window_operations(&mut messages, |op| matches!(op, Operation::Center))
         .next()
         .is_none()
     {
+        return;
+    }
+    if canvas_blocks(&config, "window center") {
         return;
     }
 
@@ -765,6 +806,9 @@ fn resize_window(
     .next() else {
         return;
     };
+    if canvas_blocks(&config, "window resize") {
+        return;
+    }
 
     let Some((frame, entity)) = windows
         .focused()
@@ -863,6 +907,9 @@ fn resize_window_vertical(
     else {
         return;
     };
+    if canvas_blocks(&config, "window vertical resize") {
+        return;
+    }
 
     let Some((_, entity)) = windows.focused() else {
         return;
@@ -966,6 +1013,9 @@ fn full_width_window(
         .next()
         .is_none()
     {
+        return;
+    }
+    if canvas_blocks(&config, "window fullwidth") {
         return;
     }
 
@@ -1313,6 +1363,9 @@ fn equalize_column(
     {
         return;
     }
+    if canvas_blocks(&config, "window equalize") {
+        return;
+    }
 
     let (_, entity) = *current_focus;
     let active_strip = active_display.active_strip();
@@ -1343,12 +1396,16 @@ fn balance_strip(
     mut messages: MessageReader<Event>,
     windows: Windows,
     active_display: ActiveDisplay,
+    config: Res<Config>,
     mut commands: Commands,
 ) {
     if filter_window_operations(&mut messages, |op| matches!(op, Operation::Balance))
         .next()
         .is_none()
     {
+        return;
+    }
+    if canvas_blocks(&config, "window balance") {
         return;
     }
 
@@ -1434,14 +1491,21 @@ pub fn stack_windows_handler(
     mut messages: MessageReader<Event>,
     windows: Windows,
     mut active_display: ActiveDisplayMut,
-    // config: Res<Config>,
+    config: Res<Config>,
     mut commands: Commands,
 ) {
-    let Some(Operation::Stack(stack)) =
-        filter_window_operations(&mut messages, |op| matches!(op, Operation::Stack(_))).next()
-    else {
+    let Some(operation) = filter_window_operations(&mut messages, |op| {
+        matches!(
+            op,
+            Operation::Stack(_) | Operation::StackEast | Operation::UnstackWest
+        )
+    })
+    .next() else {
         return;
     };
+    if canvas_blocks(&config, "window stack/unstack") {
+        return;
+    }
 
     if let Some((_, entity, unmanaged)) = windows
         .focused()
@@ -1454,11 +1518,13 @@ pub fn stack_windows_handler(
             entity_commands.try_remove::<FullWidthMarker>();
         }
         let strip = active_display.active_strip();
-        if *stack {
-            _ = strip.stack(entity);
-        } else {
-            _ = strip.unstack(entity);
-        }
+        _ = match operation {
+            Operation::Stack(true) => strip.stack(entity),
+            Operation::Stack(false) => strip.unstack_to_side(entity, false),
+            Operation::StackEast => strip.stack_east(entity),
+            Operation::UnstackWest => strip.unstack_to_side(entity, true),
+            _ => Ok(()),
+        };
 
         // Stacking/unstacking moves the focused window to a new column slot
         // (onto the left master, or out to its own column on the right).
@@ -1478,6 +1544,7 @@ pub fn toggle_tabbed_display_handler(
     mut messages: MessageReader<Event>,
     windows: Windows,
     mut active_display: ActiveDisplayMut,
+    config: Res<Config>,
     mut commands: Commands,
 ) {
     if filter_window_operations(&mut messages, |op| {
@@ -1486,6 +1553,9 @@ pub fn toggle_tabbed_display_handler(
     .next()
     .is_none()
     {
+        return;
+    }
+    if canvas_blocks(&config, "window tabbed display") {
         return;
     }
 

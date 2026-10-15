@@ -1,11 +1,11 @@
 [package]
 name = "paneru"
-version = "0.5.2"
+version = "0.5.2-slat.1"
 edition = "2024"
 rust-version = "1.95.0"
-description = "A sliding, tiling window manager for MacOS."
-homepage = "https://github.com/karinushka/paneru"
-repository = "https://github.com/karinushka/paneru"
+description = "Slat window engine: a fork of the Paneru sliding, tiling window manager for macOS."
+homepage = "https://github.com/dyascj/slat"
+repository = "https://github.com/dyascj/slat"
 readme = "README.md"
 license = "MIT"
 categories = ["os::macos-apis"]
@@ -17,7 +17,7 @@ path = "src/lib.rs"
 crate-type = ["rlib", "cdylib"]
 
 [[bin]]
-name = "paneru"
+name = "slat-engine"
 path = "src/main.rs"
 
 [lints.clippy]

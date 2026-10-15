@@ -696,7 +696,7 @@ fn test_query_state_assigns_float_only_to_active_row() {
 }
 
 #[test]
-fn test_query_state_propagates_workspace_query_failure() {
+fn test_query_state_tolerates_workspace_query_failure() {
     use crate::errors::Error;
     use crate::manager::MockWindowManagerApi;
     use crate::tests::harness::TestHarness;
@@ -712,9 +712,16 @@ fn test_query_state_propagates_workspace_query_failure() {
         .world()
         .insert_resource(WindowManager(Box::new(window_manager)));
 
-    let error = extract_query_state(harness.world()).expect_err("workspace query should fail");
-
-    assert_eq!(error.to_string(), "Generic error: workspace query failed");
+    // A failed floating-window read leaves that list empty instead of failing
+    // the whole query.
+    let state = extract_query_state(harness.world()).expect("query state extraction");
+    assert!(
+        state
+            .virtual_workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.windows)
+            .all(|window| !window.floating)
+    );
 }
 
 #[test]

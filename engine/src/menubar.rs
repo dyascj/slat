@@ -162,7 +162,8 @@ impl MenuBarManager {
 
         menu.setAutoenablesItems(false);
         status_item.setMenu(Some(&menu));
-        status_item.setVisible(true);
+        // Under the Slat host app the host owns the menu bar.
+        status_item.setVisible(!crate::util::embedded());
 
         Self {
             mtm,

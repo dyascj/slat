@@ -669,16 +669,19 @@ fn window_iterator_for_connection(
             &mut clear_tags,
         )
     })
-    .ok_or(Error::InvalidInput(format!(
-        "{}: nullptr returned from SLSCopyWindowsWithOptionsAndTags.",
-        function_name!()
-    )))?;
+    .ok_or_else(|| {
+        Error::InvalidInput(format!(
+            "{}: nullptr returned from SLSCopyWindowsWithOptionsAndTags for spaces {spaces:?} (cid {}).",
+            function_name!(),
+            cid.unwrap_or(0)
+        ))
+    })?;
     let window_list_ref = unsafe { CFRetained::from_raw(ptr) };
 
     let count = window_list_ref.count();
     if count == 0 {
         return Err(Error::NotFound(format!(
-            "{}: zero windows returned",
+            "{}: zero windows returned for spaces {spaces:?}",
             function_name!()
         )));
     }
@@ -921,7 +924,7 @@ pub fn request_ax_privilege() -> bool {
     }
 }
 
-/// Resets the TCC Accessibility entry for Paneru (`com.github.karinushka.paneru`).
+/// Resets the TCC Accessibility entry for Paneru (`io.github.dyascj.slat.engine`).
 ///
 /// Rebuilding the binary or switching between Homebrew and Cargo changes the
 /// ad-hoc code-signing hash (`cdhash`), leaving a stale TCC entry that

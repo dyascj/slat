@@ -49,6 +49,14 @@ pub mod swipe;
 /// `init.lua` exists, since a script disables the TOML entirely (see
 /// [`Config::defaults`]).
 pub static CONFIGURATION_FILE: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
+    if crate::util::embedded() {
+        return Some(embedded_configuration_file().unwrap_or_else(|error| {
+            panic!(
+                "{}: embedded mode needs a usable $PANERU_CONFIG: {error}",
+                function_name!()
+            )
+        }));
+    }
     #[cfg(feature = "lua")]
     if let Some(script) = discover_lua_file() {
         info!(
@@ -93,6 +101,18 @@ fn create_default_configuration_file() -> std::io::Result<PathBuf> {
     Ok(path)
 }
 
+/// The embedded configuration: exactly `$PANERU_CONFIG`, created with the
+/// defaults if it does not exist yet. There is no fallback location.
+fn embedded_configuration_file() -> std::io::Result<PathBuf> {
+    let path = env::var_os("PANERU_CONFIG")
+        .map(PathBuf::from)
+        .ok_or_else(|| std::io::Error::new(ErrorKind::NotFound, "$PANERU_CONFIG is not set"))?;
+    if create_configuration_file_at(&path)? {
+        info!("Created default configuration at {}", path.display());
+    }
+    Ok(path)
+}
+
 fn create_configuration_file_at(path: &Path) -> std::io::Result<bool> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(ErrorKind::InvalidInput, "configuration path has no parent")
@@ -112,6 +132,11 @@ fn create_configuration_file_at(path: &Path) -> std::io::Result<bool> {
 /// Finds the first existing configuration file from supported locations.
 /// Unlike [`CONFIGURATION_FILE`], this does not panic when no file is found.
 pub fn discover_configuration_file() -> Option<PathBuf> {
+    if crate::util::embedded() {
+        return env::var_os("PANERU_CONFIG")
+            .map(PathBuf::from)
+            .filter(|path| path.exists());
+    }
     if let Ok(path_str) = env::var("PANERU_CONFIG") {
         let path = PathBuf::from(path_str);
         if path.exists() {
@@ -183,6 +208,11 @@ fn default_lua_file() -> std::io::Result<PathBuf> {
 /// [`discover_configuration_file`]. Honors `$PANERU_LUA` first.
 #[cfg(feature = "lua")]
 pub fn discover_lua_file() -> Option<PathBuf> {
+    if crate::util::embedded() {
+        return env::var_os("PANERU_LUA")
+            .map(PathBuf::from)
+            .filter(|path| path.exists());
+    }
     if let Ok(path_str) = env::var("PANERU_LUA") {
         let path = PathBuf::from(path_str);
         if path.exists() {
@@ -219,6 +249,9 @@ pub fn discover_lua_file() -> Option<PathBuf> {
 pub fn ensure_lua_file() -> std::io::Result<Option<PathBuf>> {
     if let Some(path) = discover_lua_file() {
         return Ok(Some(path));
+    }
+    if crate::util::embedded() {
+        return Ok(None);
     }
     if let Some(toml) = discover_configuration_file() {
         info!(
@@ -446,9 +479,9 @@ impl Config {
             .windows
             .as_ref()
             .map(|windows| {
-                windows
-                    .values()
-                    .filter(|params| {
+                let mut rules = windows
+                    .iter()
+                    .filter(|(_, params)| {
                         let bundle_match =
                             params.bundle_id.as_ref().map(|id| id.as_str() == bundle_id);
                         let role_match = params.role.as_deref().map(|r| Some(r) == role);
@@ -458,7 +491,18 @@ impl Config {
                             && subrole_match.is_none_or(|m| m)
                             && params.title.is_match(title)
                     })
-                    .cloned()
+                    .collect::<Vec<_>>();
+                // Most specific rule first, then by name, so the result does
+                // not depend on hash order and callers taking the first
+                // match get the most specific rule.
+                rules.sort_by(|(a_name, a), (b_name, b)| {
+                    b.specificity()
+                        .cmp(&a.specificity())
+                        .then_with(|| a_name.cmp(b_name))
+                });
+                rules
+                    .into_iter()
+                    .map(|(_, params)| params.clone())
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default()
@@ -803,6 +847,16 @@ impl Config {
 
     pub fn auto_center(&self) -> bool {
         self.options().auto_center.is_some_and(|center| center)
+    }
+
+    /// The layout engine selected by `[options] layout`.
+    pub fn layout_mode(&self) -> LayoutMode {
+        self.inner().options.layout.unwrap_or_default()
+    }
+
+    /// Shorthand for `layout_mode() == LayoutMode::Canvas`.
+    pub fn canvas(&self) -> bool {
+        self.layout_mode() == LayoutMode::Canvas
     }
 
     pub fn horizontal_mouse_warp(&self) -> Option<i16> {
@@ -1291,6 +1345,30 @@ pub struct MainOptions {
     /// If a non-enumerated (e.g. South) gesture or window movement would target a nonexistent
     /// virtual workspace, create the workspace automatically.
     pub create_virtual_workspace_automatically: Option<bool>,
+
+    /// How windows are arranged: `"columns"` (the default scrolling strip) or
+    /// `"canvas"` (windows keep their own size and a free position on the
+    /// strip). Hot-reloadable.
+    pub layout: Option<LayoutMode>,
+}
+
+/// The layout engine selected by `[options] layout`.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(serde::Serialize))]
+#[serde(rename_all = "snake_case")]
+pub enum LayoutMode {
+    #[default]
+    Columns,
+    Canvas,
+}
+
+impl std::fmt::Display for LayoutMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            LayoutMode::Columns => "columns",
+            LayoutMode::Canvas => "canvas",
+        })
+    }
 }
 
 /// Returns a default set of column widths.
@@ -1480,6 +1558,21 @@ impl WindowParams {
             bindings_passthrough: Vec::new(),
             parsed_passthrough: Vec::new(),
         }
+    }
+
+    /// How narrowly this rule targets windows, compared lexicographically:
+    /// a bundle id beats anything else, then the number of role/subrole
+    /// constraints, then a real title pattern over a match-all one.
+    pub fn specificity(&self) -> (bool, u8, bool) {
+        let wildcard = matches!(
+            self.title.as_str(),
+            "" | ".*" | ".+" | "^.*" | ".*$" | "^.*$" | "^.+$"
+        );
+        (
+            self.bundle_id.is_some(),
+            u8::from(self.role.is_some()) + u8::from(self.subrole.is_some()),
+            !wildcard,
+        )
     }
 
     /// Returns the resolved passthrough keybindings for this window rule.

@@ -6,8 +6,8 @@
 use std::sync::mpsc::{Receiver, TryRecvError};
 
 use clap::{Parser, Subcommand};
-use tracing::{error, warn};
-use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+use tracing::{error, info, warn};
+use tracing_subscriber::{EnvFilter, fmt, fmt::writer::BoxMakeWriter, prelude::*};
 
 mod accessibility_prompt;
 mod client;
@@ -66,6 +66,7 @@ pub const VERSION_STRING: &str = concat!(env!("CARGO_PKG_VERSION"));
 /// It defines the available subcommands for controlling the Paneru daemon.
 #[derive(Clone, Debug, Default, Parser)]
 #[command(
+    name = "slat-engine",
     version = VERSION_STRING,
     author = clap::crate_authors!(),
     about = clap::crate_description!(),
@@ -185,6 +186,13 @@ pub enum QueryCmd {
 ///
 /// `Ok(())` if the application runs successfully, otherwise `Err(Error)`.
 fn main() -> Result<()> {
+    let embedded = util::embedded();
+    let log_file = embedded.then(embedded_log_file).flatten();
+    let ansi = log_file.is_none();
+    let writer = match log_file {
+        Some(file) => BoxMakeWriter::new(std::sync::Mutex::new(file)),
+        None => BoxMakeWriter::new(std::io::stderr),
+    };
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with(
@@ -194,7 +202,8 @@ fn main() -> Result<()> {
                 .with_file(true)
                 .with_target(true)
                 .with_thread_ids(false)
-                .with_writer(std::io::stderr)
+                .with_ansi(ansi)
+                .with_writer(writer)
                 .compact(),
         )
         .init();
@@ -202,6 +211,11 @@ fn main() -> Result<()> {
     let service = || service::Service::try_new(service::ID);
 
     let subcmd = Paneru::parse().subcmd.unwrap_or_default();
+    if embedded && manages_service(&subcmd) {
+        return Err(errors::Error::InvalidInput(format!(
+            "{subcmd:?} is disabled when SLAT_EMBEDDED is set; the host app manages the engine"
+        )));
+    }
     maybe_warn_deprecated_options_for_service(&subcmd);
 
     match subcmd {
@@ -221,6 +235,7 @@ fn main() -> Result<()> {
                 Ok(mut app) => {
                     app.run();
                 }
+                Err(err) if embedded => error!("Error launching the engine: {err}."),
                 Err(err) => {
                     error!(
                         "Error launching Paneru: {err}.\nStopping the service for now. You can restart it again with 'paneru restart'."
@@ -245,7 +260,67 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// The embedded engine logs to `~/Library/Logs/Slat/engine.log`. `None`
+/// (stderr) when the file cannot be opened.
+fn embedded_log_file() -> Option<std::fs::File> {
+    let dir = std::env::home_dir()?.join("Library/Logs/Slat");
+    std::fs::create_dir_all(&dir).ok()?;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("engine.log"))
+        .ok()
+}
+
+/// The subcommands that install, remove or drive the launchd service or the
+/// app launcher. The Slat host app owns those when embedded.
+fn manages_service(subcmd: &SubCmd) -> bool {
+    matches!(
+        subcmd,
+        SubCmd::Install
+            | SubCmd::Uninstall
+            | SubCmd::Reinstall
+            | SubCmd::InstallApp
+            | SubCmd::UninstallApp
+            | SubCmd::Start
+            | SubCmd::Stop
+            | SubCmd::Restart
+    )
+}
+
+/// Embedded: no menu bar and no setup dialog, the host app guides the user.
+/// Polls every 2 s until the permission shows up.
+fn wait_for_accessibility_embedded(sender: EventSender, receiver: &Receiver<Event>) -> bool {
+    let mut platform_callbacks = PlatformCallbacks::new(sender);
+    let pane = permission_pane_name();
+    warn!("{pane} permission is not granted to the host app; waiting for it (polling every 2 s).");
+    loop {
+        platform_callbacks.pump_cocoa_event_loop(2.0);
+        if check_ax_privilege() {
+            info!("{pane} permission granted; starting.");
+            return true;
+        }
+        // Nothing else matters until the permission arrives.
+        loop {
+            match receiver.try_recv() {
+                Ok(
+                    Event::Exit
+                    | Event::Command {
+                        command: commands::Command::Quit,
+                    },
+                )
+                | Err(TryRecvError::Disconnected) => return false,
+                Ok(_) => {}
+                Err(TryRecvError::Empty) => break,
+            }
+        }
+    }
+}
+
 fn wait_for_accessibility(sender: EventSender, receiver: &Receiver<Event>) -> bool {
+    if util::embedded() {
+        return wait_for_accessibility_embedded(sender, receiver);
+    }
     let mut platform_callbacks = PlatformCallbacks::new(sender.clone());
     let _menu_bar =
         MenuBarManager::new_accessibility_required(platform_callbacks.main_thread_marker, sender);

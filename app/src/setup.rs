@@ -11,6 +11,26 @@ use objc2_foundation::{NSDictionary, NSNumber, NSString};
 use crate::login::{LOGIN_ITEMS_URL, LoginStatus};
 use crate::paths::APP_NAME;
 
+/// Name of the System Settings pane that grants window control. macOS 27
+/// renamed "Accessibility" to "Device Control and Data Access".
+pub fn ax_pane() -> &'static str {
+    static NAME: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        let mut buf = [0u8; 32];
+        let mut len = buf.len();
+        // SAFETY: sysctlbyname writes at most `len` bytes into `buf`.
+        let ok = unsafe {
+            libc::sysctlbyname(c"kern.osproductversion".as_ptr(), buf.as_mut_ptr().cast(), &raw mut len, std::ptr::null_mut(), 0)
+        } == 0;
+        let major: u32 = if ok {
+            String::from_utf8_lossy(&buf[..len]).split('.').next().and_then(|m| m.trim_end_matches('\0').parse().ok()).unwrap_or(0)
+        } else {
+            0
+        };
+        if major >= 27 { "Device Control and Data Access" } else { "Accessibility" }
+    })
+}
+
 pub const ACCESSIBILITY_URL: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
 pub const TRACKPAD_URL: &str = "x-apple.systempreferences:com.apple.Trackpad-Settings.extension";
 pub const DESKTOP_URL: &str = "x-apple.systempreferences:com.apple.Desktop-Settings.extension";
@@ -124,7 +144,7 @@ pub fn build_items(e: &Env) -> Vec<Item> {
                 "accessibility",
                 Status::Missing,
                 "Accessibility needs turning off and on again",
-                format!("macOS needs you to turn {APP_NAME} off and on again in Accessibility, or remove it with the minus button and add it back. This happens after an update."),
+                format!("macOS needs you to turn {APP_NAME} off and on again in {}, or remove it with the minus button and add it back. This happens after an update.", ax_pane()),
                 affects,
             )
         } else {
@@ -132,11 +152,11 @@ pub fn build_items(e: &Env) -> Vec<Item> {
                 "accessibility",
                 Status::Missing,
                 format!("Turn on Accessibility for {APP_NAME}"),
-                format!("{APP_NAME} can't move windows without it. Turn it on in Privacy & Security › Accessibility."),
+                format!("{APP_NAME} can't move windows without it. Turn it on in Privacy & Security › {}.", ax_pane()),
                 affects,
             )
         };
-        it.fixes.push(("Open Accessibility".into(), Fix::Accessibility));
+        it.fixes.push(("Open Privacy & Security".into(), Fix::Accessibility));
         it
     });
 

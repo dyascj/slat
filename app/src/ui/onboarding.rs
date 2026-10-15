@@ -370,9 +370,9 @@ impl Onboarding {
                     ui.set_width(270.0);
                     card(ui, |ui| {
                         ui.add_space(12.0);
-                        ui.label(theme::text("Privacy & Security › Accessibility", 10.5, theme::MEDIUM).weak());
+                        ui.label(theme::text(format!("Privacy & Security › {}", crate::setup::ax_pane()), 10.5, theme::MEDIUM).weak());
                         ui.add_space(6.0);
-                        ui.label(theme::text("Accessibility", 15.0, theme::BOLD));
+                        ui.label(theme::text(crate::setup::ax_pane(), 15.0, theme::BOLD));
                         ui.add_space(2.0);
                         theme::para(ui, theme::caption("Allow these apps to control your computer."));
                         ui.add_space(8.0);

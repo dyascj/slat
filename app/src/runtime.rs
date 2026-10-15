@@ -12,6 +12,10 @@ use crate::paths;
 pub const SIG_RESTART: i32 = libc::SIGUSR1;
 /// Window -> agent: onboarding finished; start tiling and refresh state.
 pub const SIG_START: i32 = libc::SIGUSR2;
+/// Window -> agent: check GitHub for an update now.
+pub const SIG_CHECK_UPDATES: i32 = libc::SIGHUP;
+/// Window -> agent: install the available update and relaunch.
+pub const SIG_INSTALL_UPDATE: i32 = libc::SIGINFO;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -32,6 +36,8 @@ pub struct Runtime {
     pub focused_app: Option<String>,
     /// Newer version found by the update checker.
     pub update_available: Option<String>,
+    /// "installing", "ready" or "failed: <reason>" while an update is in flight.
+    pub update_status: Option<String>,
 }
 
 pub fn file() -> PathBuf {

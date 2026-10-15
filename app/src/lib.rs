@@ -1,8 +1,10 @@
 pub mod agent;
 pub mod config;
+pub mod diagnostics;
 pub mod login;
 pub mod paths;
 pub mod prefs;
 pub mod runtime;
 pub mod settings;
+pub mod setup;
 pub mod ui;

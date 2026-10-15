@@ -1,0 +1,52 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      # Every release is signed with the same self-signed certificate, so macOS keeps
+      # Slat's Accessibility permission across updates (an ad-hoc signature changes each build).
+      - name: Import signing certificate
+        env:
+          P12: ${{ secrets.CODESIGN_P12 }}
+          P12_PASSWORD: ${{ secrets.CODESIGN_P12_PASSWORD }}
+        run: |
+          echo "$P12" | base64 --decode > cert.p12
+          security create-keychain -p ci build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p ci build.keychain
+          security import cert.p12 -k build.keychain -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci build.keychain
+          rm cert.p12
+      - name: Build
+        run: |
+          test "${GITHUB_REF_NAME#v}" = "$(sed -n 's/^version = "\(.*\)"/\1/p' app/Cargo.toml | head -1)" \
+            || { echo "::error::tag does not match app/Cargo.toml version"; exit 1; }
+          UNIVERSAL=1 SIGN_IDENTITY="Slat Self-Signed" scripts/bundle.sh
+      # Slat.zip is the first download; the .tar.gz is what the in-app updater installs.
+      - name: Sign assets for the updater
+        env:
+          KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          brew install minisign
+          printf '%s\n' "$KEY" > key
+          for f in Slat.zip Slat-macos.app.tar.gz; do
+            minisign -S -s key -m "dist/$f" -t "Slat $GITHUB_REF_NAME $f" </dev/null
+          done
+          rm key
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="release-notes/$GITHUB_REF_NAME.md"
+          if [ ! -f "$notes" ]; then echo "::error::Write $notes before tagging"; exit 1; fi
+          gh release create "$GITHUB_REF_NAME" --title "Slat ${GITHUB_REF_NAME#v}" --notes-file "$notes" \
+            dist/Slat.zip dist/Slat.zip.minisig dist/Slat-macos.app.tar.gz dist/Slat-macos.app.tar.gz.minisig

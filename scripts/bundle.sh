@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds dist/Slat.app, dist/Slat.zip (first install) and dist/Slat-macos.app.tar.gz
 # (what the in-app updater installs). SIGN_IDENTITY picks the signing certificate
-# (ad-hoc by default). UNIVERSAL=1 builds arm64 + x86_64 (needs both rustup
+# (ad-hoc by default) and SIGN_KEYCHAIN the keychain holding it. UNIVERSAL=1 builds arm64 + x86_64 (needs both rustup
 # targets); otherwise builds for the host only.
 set -eu
 cd "$(dirname "$0")/.."
@@ -28,6 +28,6 @@ cp "$(build engine slat-engine)" "$APP/Contents/MacOS/slat-engine"
 sed "s/__VERSION__/$VERSION/g" assets/Info.plist > "$APP/Contents/Info.plist"
 cp assets/AppIcon.icns "$APP/Contents/Resources/"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
-codesign --force --deep --sign "${SIGN_IDENTITY:--}" "$APP"
+codesign --force --deep ${SIGN_KEYCHAIN:+--keychain "$SIGN_KEYCHAIN"} --sign "${SIGN_IDENTITY:--}" "$APP"
 (cd dist && ditto -c -k --keepParent Slat.app Slat.zip && tar -czf Slat-macos.app.tar.gz Slat.app)
 echo "built $APP ($VERSION)"

@@ -9,9 +9,12 @@ use crate::paths;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Layout {
-    #[default]
-    Columns,
     Canvas,
+    /// Also what an unknown layout (say, from a newer build) reads as, so it
+    /// can't throw away the rest of the settings.
+    #[default]
+    #[serde(other)]
+    Columns,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -248,6 +251,10 @@ mod tests {
         assert!(s.to_json().contains("\"presetColumnWidths\" : [\n    0.5,\n    0.66,\n    1\n  ]"));
         // one missing key throws the whole file away
         assert_eq!(Settings::parse(&observed.replace("\"autoCenter\" : false,", "")), Settings::default());
+        // An unknown layout falls back to columns and keeps every other value.
+        let future = Settings::parse(&observed.replace("\"animation\"", "\"layout\" : \"map\",\n  \"animation\""));
+        assert_eq!(future.layout(), Layout::Columns);
+        assert_eq!(future.animation, Animation::Snappy);
         let rule = r#"{"bundleId":"a","appName":"A","action":{"width":{"_0":0.5}}}"#;
         let r: AppRule = serde_json::from_str(rule).unwrap();
         assert_eq!(r.action, RuleAction::Width { w: 0.5 });

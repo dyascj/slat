@@ -1354,7 +1354,7 @@ enum ConfigChange {
     Ignored,
 }
 
-fn config_change(kind: &EventKind) -> ConfigChange {
+fn config_change(kind: EventKind) -> ConfigChange {
     match kind {
         // When using the RecommendedWatcher, the event triggers on file data.
         // When using PollWatcher, it triggers on modification time.
@@ -1364,30 +1364,6 @@ fn config_change(kind: &EventKind) -> ConfigChange {
         EventKind::Modify(ModifyKind::Name(_)) | EventKind::Create(_) => ConfigChange::Replaced,
         EventKind::Remove(_) => ConfigChange::Removed,
         _ => ConfigChange::Ignored,
-    }
-}
-
-#[cfg(test)]
-mod config_change_tests {
-    use super::{ConfigChange, config_change};
-    use notify::event::{
-        CreateKind, DataChange, EventKind, MetadataKind, ModifyKind, RemoveKind, RenameMode,
-    };
-
-    #[test]
-    fn atomic_saves_reload_the_config() {
-        let edited = EventKind::Modify(ModifyKind::Data(DataChange::Content));
-        assert_eq!(config_change(&edited), ConfigChange::Edited);
-        let touched = EventKind::Modify(ModifyKind::Metadata(MetadataKind::WriteTime));
-        assert_eq!(config_change(&touched), ConfigChange::Edited);
-        let renamed = EventKind::Modify(ModifyKind::Name(RenameMode::Any));
-        assert_eq!(config_change(&renamed), ConfigChange::Replaced);
-        let created = EventKind::Create(CreateKind::File);
-        assert_eq!(config_change(&created), ConfigChange::Replaced);
-        let removed = EventKind::Remove(RemoveKind::File);
-        assert_eq!(config_change(&removed), ConfigChange::Removed);
-        let opened = EventKind::Access(notify::event::AccessKind::Any);
-        assert_eq!(config_change(&opened), ConfigChange::Ignored);
     }
 }
 
@@ -1409,7 +1385,7 @@ pub(super) fn refresh_configuration_trigger(
             continue;
         };
 
-        let replaced = match config_change(&event.kind) {
+        let replaced = match config_change(event.kind) {
             ConfigChange::Edited => false,
             ConfigChange::Replaced => true,
             ConfigChange::Removed => {
@@ -1593,5 +1569,29 @@ where
         Ordering::Greater
     } else {
         Ordering::Equal
+    }
+}
+
+#[cfg(test)]
+mod config_change_tests {
+    use super::{ConfigChange, config_change};
+    use notify::event::{
+        CreateKind, DataChange, EventKind, MetadataKind, ModifyKind, RemoveKind, RenameMode,
+    };
+
+    #[test]
+    fn atomic_saves_reload_the_config() {
+        let edited = EventKind::Modify(ModifyKind::Data(DataChange::Content));
+        assert_eq!(config_change(edited), ConfigChange::Edited);
+        let touched = EventKind::Modify(ModifyKind::Metadata(MetadataKind::WriteTime));
+        assert_eq!(config_change(touched), ConfigChange::Edited);
+        let renamed = EventKind::Modify(ModifyKind::Name(RenameMode::Any));
+        assert_eq!(config_change(renamed), ConfigChange::Replaced);
+        let created = EventKind::Create(CreateKind::File);
+        assert_eq!(config_change(created), ConfigChange::Replaced);
+        let removed = EventKind::Remove(RemoveKind::File);
+        assert_eq!(config_change(removed), ConfigChange::Removed);
+        let opened = EventKind::Access(notify::event::AccessKind::Any);
+        assert_eq!(config_change(opened), ConfigChange::Ignored);
     }
 }

@@ -8,6 +8,29 @@ Slat is a scrolling tiling window manager for macOS. Every window gets its own c
 
 Slat is written in Rust, free, and MIT licensed. It lives in the menu bar and runs its window engine as a separate process, so a crash in one never takes down the other.
 
+## See it move
+
+<table>
+<tr>
+<td width="50%"><img src="assets/readme/focus.gif" alt="Moving focus along the row"><br><b>Move focus.</b> The row slides just far enough to show the window you picked.</td>
+<td width="50%"><img src="assets/readme/open.gif" alt="A new window joining the row"><br><b>Open anything.</b> New windows join the row next to the one you're using. Nothing else shrinks.</td>
+</tr>
+<tr>
+<td><img src="assets/readme/move.gif" alt="Carrying a window along the row"><br><b>Move windows.</b> Carry the focused window left or right, one place at a time.</td>
+<td><img src="assets/readme/width.gif" alt="Cycling a window's width"><br><b>Cycle width.</b> Step a window through ½, ⅔ and full. Its neighbours make room.</td>
+</tr>
+<tr>
+<td><img src="assets/readme/stack.gif" alt="Stacking windows into one column"><br><b>Stack.</b> Pile windows into one column, then pop them back out.</td>
+<td><img src="assets/readme/workspaces.gif" alt="Switching between workspace rows"><br><b>Workspaces.</b> A separate row per task, one above the other. Switching is instant.</td>
+</tr>
+<tr>
+<td><img src="assets/readme/swipe.gif" alt="Sliding the row with a trackpad swipe"><br><b>Swipe.</b> Four fingers on the trackpad slide the row, or hold a key and use the scroll wheel.</td>
+<td><img src="assets/readme/canvas.gif" alt="The canvas layout"><br><b>Canvas.</b> Windows keep their own size and spot on one long desk, and you slide the desk.</td>
+</tr>
+</table>
+
+The keycaps show the default mod key, ⌃⌥. You can switch it to ⌥ or ⌘⌥ in Settings.
+
 ## Install
 
 1. Download `Slat.zip` from the [latest release](https://github.com/dyascj/slat/releases/latest) and move `Slat.app` to `/Applications`.

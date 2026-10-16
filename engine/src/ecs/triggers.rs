@@ -16,7 +16,7 @@ use tracing::{Level, debug, error, info, instrument, trace, warn};
 use super::{
     ActiveDisplayMarker, BProcess, FocusedMarker, FreshMarker, MissionControlActive,
     PreviousManagedStrip, RetryFrontSwitch, SpawnWindowTrigger, StrayFocusEvent, SystemTheme,
-    Timeout, Unmanaged,
+    Timeout, Unmanaged, VerifyFocus,
 };
 use crate::config::Config;
 use crate::ecs::focus::FocusHistory;
@@ -110,6 +110,7 @@ pub(super) fn front_switched_trigger(
     mut messages: MessageReader<Event>,
     processes: Query<(&BProcess, &Children)>,
     applications: Query<&Application>,
+    verifying: Query<(&Window, &ChildOf), With<VerifyFocus>>,
     window_manager: Res<WindowManager>,
     mut config: GlobalState,
     mut commands: Commands,
@@ -141,7 +142,16 @@ pub(super) fn front_switched_trigger(
 
         debug!("front switching process: {}", process.name());
 
-        if let Ok(focused_id) = app.focused_window_id().inspect_err(|err| {
+        // When we just focused one of this app's windows, that is the answer.
+        // Asking the app blocks until it finishes activating (50-100 ms seen),
+        // which froze sliding windows; `detect_focus_rejection` still checks
+        // afterwards that the app really took the focus.
+        let expected = verifying
+            .iter()
+            .find(|(_, child_of)| child_of.parent() == app_entity)
+            .map(|(window, _)| window.id());
+        let focused = expected.map_or_else(|| app.focused_window_id(), Ok);
+        if let Ok(focused_id) = focused.inspect_err(|err| {
             warn!("can not get current focus: {err}");
         }) {
             if let Some(point) = window_manager.cursor_position()

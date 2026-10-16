@@ -384,7 +384,7 @@ pub struct WindowOS {
     /// `AXEnhancedUserInterface` (the common case), so the steady-state check
     /// in [`Self::disable_enhanced_ui`] is a relaxed atomic load instead of
     /// acquiring the PID lock from every `par_iter_mut` worker.
-    enhanced_ui_absent: AtomicBool,
+    enhanced_ui_absent: Arc<AtomicBool>,
 
     /// The last title read off the element, cached because reading one is a
     /// synchronous cross-process call and many callers want it for every
@@ -450,7 +450,7 @@ impl WindowOS {
             pid: OnceLock::new(),
             app_reference: OnceLock::new(),
             enhanced_ui_state: OnceLock::new(),
-            enhanced_ui_absent: AtomicBool::new(false),
+            enhanced_ui_absent: Arc::new(AtomicBool::new(false)),
             title: RwLock::new(None),
             role: OnceLock::new(),
             subrole: OnceLock::new(),
@@ -555,63 +555,15 @@ impl WindowOS {
             .get_or_init(|| enhanced_ui_state(pid))
             .clone();
         let app_element = self.app_reference()?;
-        let restore_element = app_element.clone();
-        let window_id = self.id;
-        match acquire_enhanced_ui(
-            state,
-            pid,
-            || {
-                read_enhanced_ui(&app_element).inspect(|enabled| {
-                    debug!(
-                        target: "paneru::ax_diagnostics",
-                        pid,
-                        window_id,
-                        enabled,
-                        "read AXEnhancedUserInterface"
-                    );
-                })
-            },
-            || set_enhanced_ui(&app_element, false, pid, window_id),
-            move || set_enhanced_ui(&restore_element, true, pid, window_id),
-        ) {
-            Ok(guard) => {
-                if guard.is_none() {
-                    debug!(
-                        target: "paneru::ax_diagnostics",
-                        pid,
-                        window_id,
-                        "permanently caching false; skipping enhanced UI workaround"
-                    );
-                    self.enhanced_ui_absent.store(true, Ordering::Relaxed);
-                }
-                guard
-            }
-            Err(err) => {
-                warn!(pid, window_id, "error reading enhanced UI: {err}");
-                None
-            }
-        }
+        disable_enhanced_ui_for(&self.enhanced_ui_absent, pid, state, app_element, self.id)
     }
 
     fn set_ax_position(&mut self, origin: Origin) {
-        let mut point = CGPoint::new(
+        let point = CGPoint::new(
             f64::from(origin.x + self.horizontal_padding),
             f64::from(origin.y + self.vertical_padding),
         );
-        let position_ref = unsafe {
-            AXValueCreate(
-                kAXValueTypeCGPoint,
-                NonNull::from(&mut point).as_ptr().cast(),
-            )
-        };
-        if let Ok(position) = AXUIWrapper::from_retained(position_ref) {
-            unsafe {
-                AXUIElementSetAttributeValue(
-                    self.ax_element.as_ptr(),
-                    CFString::from_static_str(kAXPositionAttribute).as_ref(),
-                    position.as_ref(),
-                )
-            };
+        if set_ax_position_of(&self.ax_element, point) {
             let size = self.frame.size();
             self.frame.min = origin;
             self.frame.max = origin + size;
@@ -641,33 +593,6 @@ impl WindowOS {
             };
             self.frame.max = self.frame.min + size;
         }
-    }
-
-    /// Makes the window the key window for its application by sending synthesized events.
-    ///
-    /// # Arguments
-    ///
-    /// * `psn` - The process serial number of the application.
-    fn make_key_window(&self, psn: &ProcessSerialNumber) {
-        // Reason: On macOS 14 (Sonoma), CGSEncodeEventRecord serializes the raw event
-        // buffer via NSKeyedArchiver, misinterpreting 0xFF fill as an ObjC class pointer,
-        // causing SIGABRT. See https://github.com/karinushka/paneru/issues/123
-        if macos_major_version() == 14 {
-            debug!("make_key_window: skipped on macOS 14 (Sonoma) to prevent crash");
-            return;
-        }
-        let window_id = self.id();
-        let mut event_bytes = [0u8; 0xf8];
-        event_bytes[0x04] = 0xf8;
-        event_bytes[0x3a] = 0x10;
-        event_bytes[0x3c..0x40].copy_from_slice(&window_id.to_ne_bytes());
-        event_bytes[0x20..0x30].fill(0xff);
-
-        event_bytes[0x08] = 0x01;
-        unsafe { SLPSPostEventRecordTo(psn, event_bytes.as_ptr().cast()) };
-
-        event_bytes[0x08] = 0x02;
-        unsafe { SLPSPostEventRecordTo(psn, event_bytes.as_ptr().cast()) };
     }
 }
 
@@ -786,8 +711,39 @@ impl WindowApi for WindowOS {
             trace!("already in position.");
             return;
         }
-        let _enhanced_ui = self.disable_enhanced_ui();
-        self.set_ax_position(origin);
+        let size = self.frame.size();
+        self.frame.min = origin;
+        self.frame.max = origin + size;
+        let point = CGPoint::new(
+            f64::from(origin.x + self.horizontal_padding),
+            f64::from(origin.y + self.vertical_padding),
+        );
+        let Ok(pid) = self.pid() else {
+            set_ax_position_of(&self.ax_element, point);
+            return;
+        };
+        let enhanced = (!self.enhanced_ui_absent.load(Ordering::Relaxed))
+            .then(|| self.app_reference())
+            .flatten()
+            .map(|app_element| {
+                let state = self
+                    .enhanced_ui_state
+                    .get_or_init(|| enhanced_ui_state(pid))
+                    .clone();
+                (state, app_element, self.enhanced_ui_absent.clone())
+            });
+        let element = self.ax_element.clone();
+        let window_id = self.id;
+        send_move(
+            pid,
+            window_id,
+            Box::new(move || {
+                let _enhanced_ui = enhanced.and_then(|(state, app_element, absent)| {
+                    disable_enhanced_ui_for(&absent, pid, state, app_element, window_id)
+                });
+                set_ax_position_of(&element, point);
+            }),
+        );
     }
 
     #[instrument(level = Level::TRACE)]
@@ -909,47 +865,23 @@ impl WindowApi for WindowOS {
         currently_focused: &Window,
         focused_psn: ProcessSerialNumber,
     ) {
-        let window_id = self.id();
-        debug!("{window_id}");
-        if focused_psn == psn {
-            let mut event_bytes = [0u8; 0xf8];
-            event_bytes[0x04] = 0xf8;
-            event_bytes[0x08] = 0x0d;
-
-            event_bytes[0x8a] = 0x02;
-            event_bytes[0x3c..0x40].copy_from_slice(&currently_focused.id().to_ne_bytes());
-            unsafe {
-                SLPSPostEventRecordTo(&focused_psn, event_bytes.as_ptr().cast());
-            }
-
-            // Artificially delay the activation. This is necessary because some
-            // applications appear to be confused if both of the events appear instantaneously.
-            thread::sleep(Duration::from_millis(20));
-
-            event_bytes[0x8a] = 0x01;
-            event_bytes[0x3c..0x40].copy_from_slice(&window_id.to_ne_bytes());
-            unsafe {
-                SLPSPostEventRecordTo(&psn, event_bytes.as_ptr().cast());
-            }
-        }
-
-        unsafe {
-            _SLPSSetFrontProcessWithOptions(&psn, window_id, CPS_USER_GENERATED);
-        }
-        self.make_key_window(&psn);
+        debug!("{}", self.id());
+        send_focus(FocusRequest::WithoutRaise {
+            window_id: self.id(),
+            psn,
+            focused_id: currently_focused.id(),
+            focused_psn,
+        });
     }
 
     /// Focuses the window and raises it to the front.
     #[instrument(level = Level::DEBUG)]
     fn focus_with_raise(&self, psn: ProcessSerialNumber) {
-        let window_id = self.id();
-        unsafe {
-            _SLPSSetFrontProcessWithOptions(&psn, window_id, CPS_USER_GENERATED);
-        }
-        self.make_key_window(&psn);
-        let element_ref = self.ax_element.as_ptr();
-        let action = CFString::from_static_str(kAXRaiseAction);
-        unsafe { AXUIElementPerformAction(element_ref, &action) };
+        send_focus(FocusRequest::WithRaise {
+            window_id: self.id(),
+            psn,
+            element: self.ax_element.clone(),
+        });
     }
 
     #[instrument(level = Level::DEBUG)]
@@ -1021,6 +953,240 @@ impl WindowApi for WindowOS {
             radii.get(0)?.as_i64().map(|v| v as f64)
         })
     }
+}
+
+/// A focus change to run on the focus worker.
+enum FocusRequest {
+    WithRaise {
+        window_id: WinID,
+        psn: ProcessSerialNumber,
+        element: CFRetained<AXUIWrapper>,
+    },
+    WithoutRaise {
+        window_id: WinID,
+        psn: ProcessSerialNumber,
+        focused_id: WinID,
+        focused_psn: ProcessSerialNumber,
+    },
+}
+
+/// Hands a focus change to a dedicated thread instead of running it on the
+/// engine's loop. Activating another app and raising its window wait on that
+/// app (measured 10-65 ms with Chrome as the target), and every sliding window
+/// froze for that long, so moving focus quickly across apps stuttered. One
+/// worker keeps the requests in order; when several queue up, only the newest
+/// runs, since an older focus would be replaced immediately anyway.
+fn send_focus(request: FocusRequest) {
+    static WORKER: OnceLock<Mutex<std::sync::mpsc::Sender<FocusRequest>>> = OnceLock::new();
+    let sender = WORKER.get_or_init(|| {
+        let (sender, receiver) = std::sync::mpsc::channel::<FocusRequest>();
+        thread::Builder::new()
+            .name("focus".into())
+            .spawn(move || {
+                while let Ok(mut request) = receiver.recv() {
+                    while let Ok(newer) = receiver.try_recv() {
+                        request = newer;
+                    }
+                    objc2::rc::autoreleasepool(|_| run_focus(request));
+                }
+            })
+            .expect("spawning the focus worker");
+        Mutex::new(sender)
+    });
+    if let Ok(sender) = sender.lock() {
+        let _ = sender.send(request);
+    }
+}
+
+fn run_focus(request: FocusRequest) {
+    match request {
+        FocusRequest::WithRaise {
+            window_id,
+            psn,
+            element,
+        } => {
+            unsafe { _SLPSSetFrontProcessWithOptions(&psn, window_id, CPS_USER_GENERATED) };
+            make_key_window(&psn, window_id);
+            let action = CFString::from_static_str(kAXRaiseAction);
+            unsafe { AXUIElementPerformAction(element.as_ptr(), &action) };
+        }
+        FocusRequest::WithoutRaise {
+            window_id,
+            psn,
+            focused_id,
+            focused_psn,
+        } => {
+            if focused_psn == psn {
+                let mut event_bytes = [0u8; 0xf8];
+                event_bytes[0x04] = 0xf8;
+                event_bytes[0x08] = 0x0d;
+
+                event_bytes[0x8a] = 0x02;
+                event_bytes[0x3c..0x40].copy_from_slice(&focused_id.to_ne_bytes());
+                unsafe {
+                    SLPSPostEventRecordTo(&focused_psn, event_bytes.as_ptr().cast());
+                }
+
+                // Artificially delay the activation. This is necessary because some
+                // applications appear to be confused if both of the events appear instantaneously.
+                thread::sleep(Duration::from_millis(20));
+
+                event_bytes[0x8a] = 0x01;
+                event_bytes[0x3c..0x40].copy_from_slice(&window_id.to_ne_bytes());
+                unsafe {
+                    SLPSPostEventRecordTo(&psn, event_bytes.as_ptr().cast());
+                }
+            }
+            unsafe { _SLPSSetFrontProcessWithOptions(&psn, window_id, CPS_USER_GENERATED) };
+            make_key_window(&psn, window_id);
+        }
+    }
+}
+
+/// Makes the window the key window for its application by sending synthesized events.
+fn make_key_window(psn: &ProcessSerialNumber, window_id: WinID) {
+    // Reason: On macOS 14 (Sonoma), CGSEncodeEventRecord serializes the raw event
+    // buffer via NSKeyedArchiver, misinterpreting 0xFF fill as an ObjC class pointer,
+    // causing SIGABRT. See https://github.com/karinushka/paneru/issues/123
+    if macos_major_version() == 14 {
+        debug!("make_key_window: skipped on macOS 14 (Sonoma) to prevent crash");
+        return;
+    }
+    let mut event_bytes = [0u8; 0xf8];
+    event_bytes[0x04] = 0xf8;
+    event_bytes[0x3a] = 0x10;
+    event_bytes[0x3c..0x40].copy_from_slice(&window_id.to_ne_bytes());
+    event_bytes[0x20..0x30].fill(0xff);
+
+    event_bytes[0x08] = 0x01;
+    unsafe { SLPSPostEventRecordTo(psn, event_bytes.as_ptr().cast()) };
+
+    event_bytes[0x08] = 0x02;
+    unsafe { SLPSPostEventRecordTo(psn, event_bytes.as_ptr().cast()) };
+}
+
+/// [`WindowOS::disable_enhanced_ui`] without the window, so a mover thread can
+/// run it.
+fn disable_enhanced_ui_for(
+    absent: &AtomicBool,
+    pid: Pid,
+    state: Arc<Mutex<EnhancedUiState>>,
+    app_element: CFRetained<AXUIWrapper>,
+    window_id: WinID,
+) -> Option<EnhancedUiGuard<impl FnOnce() -> Result<()> + use<>>> {
+    let restore_element = app_element.clone();
+    match acquire_enhanced_ui(
+        state,
+        pid,
+        || {
+            read_enhanced_ui(&app_element).inspect(|enabled| {
+                debug!(
+                    target: "paneru::ax_diagnostics",
+                    pid,
+                    window_id,
+                    enabled,
+                    "read AXEnhancedUserInterface"
+                );
+            })
+        },
+        || set_enhanced_ui(&app_element, false, pid, window_id),
+        move || set_enhanced_ui(&restore_element, true, pid, window_id),
+    ) {
+        Ok(guard) => {
+            if guard.is_none() {
+                debug!(
+                    target: "paneru::ax_diagnostics",
+                    pid,
+                    window_id,
+                    "permanently caching false; skipping enhanced UI workaround"
+                );
+                absent.store(true, Ordering::Relaxed);
+            }
+            guard
+        }
+        Err(err) => {
+            warn!(pid, window_id, "error reading enhanced UI: {err}");
+            None
+        }
+    }
+}
+
+/// Sets an element's AX position; false when the value could not be built.
+fn set_ax_position_of(element: &AXUIWrapper, mut point: CGPoint) -> bool {
+    let position_ref = unsafe {
+        AXValueCreate(
+            kAXValueTypeCGPoint,
+            NonNull::from(&mut point).as_ptr().cast(),
+        )
+    };
+    let Ok(position) = AXUIWrapper::from_retained(position_ref) else {
+        return false;
+    };
+    unsafe {
+        AXUIElementSetAttributeValue(
+            element.as_ptr(),
+            CFString::from_static_str(kAXPositionAttribute).as_ref(),
+            position.as_ref(),
+        )
+    };
+    true
+}
+
+type MoveJob = Box<dyn FnOnce() + Send>;
+type MoveSender = std::sync::mpsc::Sender<(WinID, MoveJob)>;
+
+/// Applies window moves on one thread per app instead of on the engine loop.
+///
+/// Setting a position waits for the app to answer, and an app that is busy
+/// (say, one that was just activated) can take 50-100 ms. Applying all moves
+/// and then waiting for every app made the whole row freeze on the slowest
+/// one. Each app now has its own mover: a slow app only delays its own
+/// windows, and when a mover falls behind it skips straight to the newest
+/// position of each window.
+// ponytail: one long-lived thread per app that ever had a window moved; reap idle movers if app churn ever matters.
+fn send_move(pid: Pid, window_id: WinID, job: MoveJob) {
+    static MOVERS: LazyLock<Mutex<HashMap<Pid, MoveSender>>> = LazyLock::new(Mutex::default);
+    let Ok(mut movers) = MOVERS.lock() else {
+        return job();
+    };
+    let sender = movers.entry(pid).or_insert_with(|| spawn_mover(pid));
+    if let Err(std::sync::mpsc::SendError((window_id, job))) = sender.send((window_id, job)) {
+        // The mover is gone (it only exits if its thread panicked): replace it.
+        let fresh = spawn_mover(pid);
+        let _ = fresh.send((window_id, job));
+        *sender = fresh;
+    }
+}
+
+fn spawn_mover(pid: Pid) -> MoveSender {
+    let (sender, receiver) = std::sync::mpsc::channel::<(WinID, MoveJob)>();
+    let spawned = thread::Builder::new()
+        .name(format!("mover-{pid}"))
+        .spawn(move || {
+            while let Ok(first) = receiver.recv() {
+                let mut batch = vec![first];
+                batch.extend(receiver.try_iter());
+                for (_, job) in latest_per_window(batch) {
+                    objc2::rc::autoreleasepool(|_| job());
+                }
+            }
+        });
+    if let Err(err) = spawned {
+        warn!("spawning the mover for pid {pid}: {err}");
+    }
+    sender
+}
+
+/// Keeps only the newest entry for each window, in the order they were newest.
+fn latest_per_window<T>(batch: Vec<(WinID, T)>) -> Vec<(WinID, T)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut kept: Vec<(WinID, T)> = batch
+        .into_iter()
+        .rev()
+        .filter(|(window_id, _)| seen.insert(*window_id))
+        .collect();
+    kept.reverse();
+    kept
 }
 
 #[cfg(test)]
@@ -1529,5 +1695,19 @@ mod tests {
         let previous = IRect::new(0, 40, 800, 640);
         let completed = IRect::new(0, 40, 4112, 640);
         assert_eq!(resize_staging_origin(previous, completed, 4112), None);
+    }
+}
+
+#[cfg(test)]
+mod mover_tests {
+    use super::latest_per_window;
+
+    #[test]
+    fn keeps_newest_move_per_window_in_order() {
+        let batch = vec![(1, "a1"), (2, "b1"), (1, "a2"), (3, "c1"), (2, "b2")];
+        assert_eq!(
+            latest_per_window(batch),
+            vec![(1, "a2"), (3, "c1"), (2, "b2")]
+        );
     }
 }

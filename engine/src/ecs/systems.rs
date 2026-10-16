@@ -585,6 +585,76 @@ fn ease_out_factor(rate: f64, delta: f64) -> f32 {
     (1.0 - (-rate * delta).exp()).clamp(0.0, 1.0) as f32
 }
 
+/// Paces window animation to the display's refresh rate.
+///
+/// Every reposition we make echoes back as a window-moved event, and any event
+/// drops the pump's wait to 1 ms, so an unpaced animation feeds itself: it ran
+/// at ~370 steps a second, sending each moving window a new position six times
+/// per screen frame. The apps applied that flood late and unevenly, which read
+/// as stutter when sliding the row across several apps. Steps now advance at
+/// most once per display frame; input is still handled on every loop turn.
+#[derive(bevy::ecs::resource::Resource, Default)]
+pub(crate) struct AnimationClock {
+    /// `Time::elapsed()` at the last step (engine time, so tests can drive it).
+    last_step: Option<Duration>,
+    interval: Duration,
+    /// Seconds to advance this frame, or `None` when no step is due.
+    step: Option<f64>,
+}
+
+impl AnimationClock {
+    /// Decides whether a step is due at `now`; returns the seconds to advance.
+    fn tick(&mut self, now: Duration, refresh_hz: impl FnOnce() -> f64) -> Option<f64> {
+        let step = match self.last_step {
+            None => {
+                // First frame of an animation: move right away by one frame.
+                self.interval = Duration::from_secs_f64(1.0 / refresh_hz().clamp(30.0, 240.0));
+                Some(self.interval.as_secs_f64())
+            }
+            // Allow a quarter-frame of jitter so a 120 Hz display isn't
+            // stepped at 60 Hz when the loop wakes a hair early.
+            Some(last) if now.saturating_sub(last) >= self.interval.mul_f64(0.75) => {
+                Some(now.saturating_sub(last).as_secs_f64())
+            }
+            Some(_) => None,
+        };
+        if step.is_some() {
+            self.last_step = Some(now);
+        }
+        self.step = step;
+        step
+    }
+
+    fn reset(&mut self) {
+        self.last_step = None;
+        self.step = None;
+    }
+}
+
+fn display_refresh_hz() -> f64 {
+    let Some(mtm) = objc2::MainThreadMarker::new() else {
+        return 60.0;
+    };
+    objc2_app_kit::NSScreen::mainScreen(mtm)
+        .and_then(|screen| u32::try_from(screen.maximumFramesPerSecond()).ok())
+        .map_or(60.0, f64::from)
+}
+
+type Animating = Or<(With<RepositionMarker>, With<ResizeMarker>)>;
+
+/// Runs before the animators: decides whether this loop turn draws a frame.
+pub(super) fn tick_animation_clock(
+    mut clock: ResMut<AnimationClock>,
+    time: Res<Time>,
+    moving: Query<(), Animating>,
+) {
+    if moving.is_empty() {
+        clock.reset();
+    } else {
+        clock.tick(time.elapsed(), display_refresh_hz);
+    }
+}
+
 /// This is a Bevy system that runs on `Update`. It smoothly moves windows to their target
 /// positions, as indicated by the `RepositionMarker` component.
 /// Animation speed is controlled by the `animation_speed` in the `Config`.
@@ -600,13 +670,14 @@ fn ease_out_factor(rate: f64, delta: f64) -> f32 {
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn animate_entities(
     animate: Populated<(&mut Position, Entity, &RepositionMarker)>,
-    time: Res<Time>,
+    clock: Res<AnimationClock>,
     config: Res<Config>,
     mut commands: Commands,
 ) {
+    let Some(delta) = clock.step else { return };
     // Frame-rate-independent exponential smoothing (ease-out).
     // `animation_speed` is the decay rate (per second); higher = snappier.
-    let t = ease_out_factor(config.animation_speed(), time.delta_secs_f64());
+    let t = ease_out_factor(config.animation_speed(), delta);
 
     animate
         .into_iter()
@@ -648,12 +719,13 @@ pub(super) fn animate_entities(
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn animate_resize_entities(
     animate: Populated<(&mut Bounds, Entity, &ResizeMarker)>,
-    time: Res<Time>,
+    clock: Res<AnimationClock>,
     config: Res<Config>,
     mut commands: Commands,
 ) {
+    let Some(delta) = clock.step else { return };
     // Matches animate_entities: exponential ease-out, frame-rate independent.
-    let t = ease_out_factor(config.animation_speed(), time.delta_secs_f64());
+    let t = ease_out_factor(config.animation_speed(), delta);
 
     animate
         .into_iter()
@@ -2004,5 +2076,43 @@ mod fork_tests {
         // Folding keeps the leader in front.
         assert!(fold_native_tab(&mut strip, e[0], e[1]));
         assert_eq!(strip.tab_group(e[0]), Some(vec![e[0], e[1]]));
+    }
+}
+
+#[cfg(test)]
+mod animation_clock_tests {
+    use super::AnimationClock;
+    use std::time::Duration;
+
+    #[test]
+    fn steps_once_per_display_frame() {
+        let mut clock = AnimationClock::default();
+        let t0 = Duration::from_secs(5);
+        // The first frame of an animation moves immediately by one frame.
+        let first = clock.tick(t0, || 120.0).unwrap();
+        assert!((first - 1.0 / 120.0).abs() < 1e-9);
+        // Loop turns in between (echo events, ~1-3 ms apart) don't step.
+        for ms in [1, 3, 5] {
+            assert_eq!(
+                clock.tick(t0 + Duration::from_millis(ms), || unreachable!()),
+                None
+            );
+        }
+        // Once a frame is due it steps by the real elapsed time.
+        let step = clock
+            .tick(t0 + Duration::from_millis(9), || unreachable!())
+            .unwrap();
+        assert!((step - 0.009).abs() < 1e-9);
+        // A new animation after a reset starts immediately again.
+        clock.reset();
+        assert!(
+            clock
+                .tick(t0 + Duration::from_millis(10), || 60.0)
+                .is_some()
+        );
+        assert_eq!(
+            clock.tick(t0 + Duration::from_millis(20), || unreachable!()),
+            None
+        );
     }
 }

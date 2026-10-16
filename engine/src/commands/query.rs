@@ -4,7 +4,7 @@ use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::Added;
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs;
-use bevy::ecs::system::{Query, Res, ResMut};
+use bevy::ecs::system::{Local, Query, Res, ResMut};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,6 +12,7 @@ use tracing::warn;
 
 use super::{Command, Operation};
 
+use crate::ecs::params::FrameActivity;
 use crate::ecs::state::{
     PaneruActiveState, PaneruQueryState, PaneruVirtualWorkspaceState, PaneruWindowState,
     QueryStateParams, StateEvent,
@@ -102,6 +103,22 @@ struct StateBroadcastIntent {
 }
 
 impl StateBroadcastIntent {
+    /// Folds a later intent into this one, so changes seen while windows are
+    /// still sliding go out together once the slide settles.
+    fn merge(&mut self, other: Self) {
+        self.virtual_workspace_changed |= other.virtual_workspace_changed;
+        self.windows_changed |= other.windows_changed;
+        self.window_focused |= other.window_focused;
+        self.on_screen_changed |= other.on_screen_changed;
+        self.title_changes.extend(other.title_changes);
+        for display in other.display_changes {
+            if !self.display_changes.contains(&display) {
+                self.display_changes.push(display);
+            }
+        }
+        self.active_display_changed |= other.active_display_changed;
+    }
+
     fn from_events<'a>(
         events: impl IntoIterator<Item = &'a Event>,
         signals: StateBroadcastSignals,
@@ -367,6 +384,11 @@ fn collect_state_broadcast_events_for_intent(
     outgoing
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "a Bevy system: each parameter is a query or resource it reads"
+)]
 fn state_event_broadcast_handler(
     mut messages: MessageReader<Event>,
     mut subscribers: ResMut<StateSubscribers>,
@@ -374,6 +396,8 @@ fn state_event_broadcast_handler(
     focused_changes: Query<Entity, Added<FocusedMarker>>,
     active_workspace_changes: Query<Entity, Added<ActiveWorkspaceMarker>>,
     state: QueryStateParams,
+    activity: FrameActivity,
+    mut pending: Local<StateBroadcastIntent>,
 ) {
     let events = messages.read().collect::<Vec<_>>();
 
@@ -395,7 +419,14 @@ fn state_event_broadcast_handler(
         }),
         window_focused: !focused_changes.is_empty(),
     };
-    let intent = StateBroadcastIntent::from_events(events, signals);
+    pending.merge(StateBroadcastIntent::from_events(events, signals));
+    // Extracting state queries the window server for every workspace, which
+    // stalled sliding windows on every focus change. Subscribers only need the
+    // settled result, so hold the changes until nothing is moving.
+    if activity.mid_frame() {
+        return;
+    }
+    let intent = std::mem::take(&mut *pending);
     if intent.is_empty() {
         return;
     }

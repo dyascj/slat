@@ -69,6 +69,11 @@ pub(crate) use triggers::apply_config_side_effects;
 ///
 /// * `app` - The Bevy application to register the systems with.
 #[allow(clippy::too_many_lines)]
+fn not_animating(activity: params::FrameActivity) -> bool {
+    !activity.mid_frame()
+}
+
+#[allow(clippy::too_many_lines)]
 pub fn register_systems(app: &mut bevy::app::App) {
     const CLOSED_WINDOW_CHECK_FREQ: Duration = Duration::from_secs(1);
     const LOW_POWER_MODE_CHECK: Duration = Duration::from_mins(1);
@@ -183,7 +188,18 @@ pub fn register_systems(app: &mut bevy::app::App) {
         systems::fold_tab_switch_on_focus
             .after(triggers::window_focused_trigger)
             .run_if(native_tabs_enabled)
+            // It asks the newly focused app for its windows, which blocks
+            // while that app activates; `Added` still sees the focus change
+            // once the slide has settled.
+            .run_if(not_animating)
             .run_if(not(resource_exists::<Initializing>)),
+    );
+    app.init_resource::<systems::AnimationClock>();
+    app.add_systems(
+        PostUpdate,
+        systems::tick_animation_clock
+            .before(systems::animate_entities)
+            .before(systems::animate_resize_entities),
     );
     app.add_systems(
         PostUpdate,

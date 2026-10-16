@@ -1342,6 +1342,55 @@ pub(super) fn apply_window_positions(
     }
 }
 
+/// What a file event on a config file means for the running config.
+#[derive(Debug, PartialEq, Eq)]
+enum ConfigChange {
+    /// Written in place: reload.
+    Edited,
+    /// Replaced by a new file (a rename or create over it, which is how
+    /// atomic saves land, including the Slat app's): reload and re-watch.
+    Replaced,
+    Removed,
+    Ignored,
+}
+
+fn config_change(kind: &EventKind) -> ConfigChange {
+    match kind {
+        // When using the RecommendedWatcher, the event triggers on file data.
+        // When using PollWatcher, it triggers on modification time.
+        EventKind::Modify(
+            ModifyKind::Metadata(MetadataKind::WriteTime) | ModifyKind::Data(DataChange::Content),
+        ) => ConfigChange::Edited,
+        EventKind::Modify(ModifyKind::Name(_)) | EventKind::Create(_) => ConfigChange::Replaced,
+        EventKind::Remove(_) => ConfigChange::Removed,
+        _ => ConfigChange::Ignored,
+    }
+}
+
+#[cfg(test)]
+mod config_change_tests {
+    use super::{ConfigChange, config_change};
+    use notify::event::{
+        CreateKind, DataChange, EventKind, MetadataKind, ModifyKind, RemoveKind, RenameMode,
+    };
+
+    #[test]
+    fn atomic_saves_reload_the_config() {
+        let edited = EventKind::Modify(ModifyKind::Data(DataChange::Content));
+        assert_eq!(config_change(&edited), ConfigChange::Edited);
+        let touched = EventKind::Modify(ModifyKind::Metadata(MetadataKind::WriteTime));
+        assert_eq!(config_change(&touched), ConfigChange::Edited);
+        let renamed = EventKind::Modify(ModifyKind::Name(RenameMode::Any));
+        assert_eq!(config_change(&renamed), ConfigChange::Replaced);
+        let created = EventKind::Create(CreateKind::File);
+        assert_eq!(config_change(&created), ConfigChange::Replaced);
+        let removed = EventKind::Remove(RemoveKind::File);
+        assert_eq!(config_change(&removed), ConfigChange::Removed);
+        let opened = EventKind::Access(notify::event::AccessKind::Any);
+        assert_eq!(config_change(&opened), ConfigChange::Ignored);
+    }
+}
+
 pub(super) fn refresh_configuration_trigger(
     mut messages: MessageReader<Event>,
     window_manager: Res<WindowManager>,
@@ -1360,14 +1409,10 @@ pub(super) fn refresh_configuration_trigger(
             continue;
         };
 
-        match &event.kind {
-            EventKind::Modify(
-                // When using the RecommendedWatcher, the event triggers on file data.
-                // When using PollWatcher, it triggers on modification time.
-                ModifyKind::Metadata(MetadataKind::WriteTime)
-                | ModifyKind::Data(DataChange::Content),
-            ) => (),
-            EventKind::Remove(_) => {
+        let replaced = match config_change(&event.kind) {
+            ConfigChange::Edited => false,
+            ConfigChange::Replaced => true,
+            ConfigChange::Removed => {
                 for path in &event.paths {
                     _ = watcher.unwatch(path).inspect_err(|err| {
                         error!("unwatching the config '{}': {err}", path.display());
@@ -1375,8 +1420,8 @@ pub(super) fn refresh_configuration_trigger(
                 }
                 continue;
             }
-            _ => continue,
-        }
+            ConfigChange::Ignored => continue,
+        };
 
         // An init.lua disables the TOML path entirely, so there is nothing here
         // to reload — see `CONFIGURATION_FILE`.
@@ -1404,6 +1449,13 @@ pub(super) fn refresh_configuration_trigger(
                 {
                     **watcher = new_watcher;
                 }
+            } else if replaced
+                && let Some(new_watcher) =
+                    crate::ecs::rewatch_configs(&window_manager, path.as_path())
+            {
+                // A save that renames a new file over the old one leaves the
+                // watch on the replaced file; watch the new one.
+                **watcher = new_watcher;
             }
             info!("Reloading configuration file; {}", path.display());
             _ = config.reload_config(path.as_path()).inspect_err(|err| {

@@ -375,13 +375,14 @@ impl SettingsApp {
                 }
             });
             hairline(ui);
-            row_below(ui, "Cycle width presets", Some("Widths that “cycle width” steps through. Pick at least one."), canvas, |ui| {
+            row_below(ui, "Cycle width presets", Some("Widths that “cycle width” steps through. Pick at least two."), canvas, |ui| {
                 for w in WIDTHS {
                     let presets = &mut self.s.preset_column_widths;
                     let pos = presets.iter().position(|x| (x - w).abs() < 0.005);
                     if theme::chip(ui, width_label(w), pos.is_some()).clicked() {
                         match pos {
-                            Some(i) if presets.len() > 1 => {
+                            // Two minimum: with one preset, cycle width just snaps to it.
+                            Some(i) if presets.len() > 2 => {
                                 presets.remove(i);
                             }
                             Some(_) => {}

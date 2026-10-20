@@ -1,5 +1,6 @@
-//! Ash tokens (black glass, grey ramp, pastel pops), SF fonts and the
-//! hand-drawn controls every window shares. Always dark.
+//! Ash tokens (black glass, grey ramp, pastel pops), SF Pro (SF Mono for
+//! values and keycaps) and the hand-drawn controls every window shares.
+//! Always dark.
 
 use std::sync::Arc;
 
@@ -90,6 +91,8 @@ pub fn install(ctx: &egui::Context) {
     // SF Mono's default instance is Light; start from Regular.
     let regular = FontTweak { coords: VariationCoords::new([(b"wght", REGULAR)]), ..FontTweak::default() };
     add("sf-mono", "/System/Library/Fonts/SFNSMono.ttf", FontFamily::Monospace, regular);
+    // SF Pro has no ↵ ⇥ ⌫; egui's bundled Hack does.
+    defs.families.entry(FontFamily::Proportional).or_default().push("Hack".into());
     ctx.set_fonts(defs);
     ctx.set_theme(egui::Theme::Dark);
     ctx.set_style_of(egui::Theme::Dark, style());
@@ -138,10 +141,10 @@ fn style() -> egui::Style {
     s.spacing.menu_margin = Margin::same(6);
     s.animation_time = 0.15;
     s.text_styles = [
-        (TextStyle::Small, FontId::monospace(11.0)),
-        (TextStyle::Body, FontId::monospace(13.0)),
-        (TextStyle::Button, FontId::monospace(13.0)),
-        (TextStyle::Heading, FontId::monospace(15.0)),
+        (TextStyle::Small, FontId::proportional(11.0)),
+        (TextStyle::Body, FontId::proportional(13.0)),
+        (TextStyle::Button, FontId::proportional(13.0)),
+        (TextStyle::Heading, FontId::proportional(15.0)),
         (TextStyle::Monospace, FontId::monospace(13.0)),
     ]
     .into();
@@ -150,9 +153,9 @@ fn style() -> egui::Style {
 
 // ---- text ----
 
-/// SF Mono, the voice of the app: labels, values, keycaps, headings.
+/// SF Pro, the voice of the app: labels, values, headings.
 pub fn text(s: impl Into<String>, size: f32, weight: f32) -> RichText {
-    RichText::new(s).family(FontFamily::Monospace).size(size).variation(b"wght", weight)
+    RichText::new(s).family(FontFamily::Proportional).size(size).variation(b"wght", weight)
 }
 
 /// SF Pro for longer copy, with Ghostty's roomier line height.
@@ -168,8 +171,9 @@ pub fn caption(s: impl Into<String>) -> RichText {
     sans(s, 12.0).weak()
 }
 
+/// SF Mono, for numbers that line up, versions and keycaps.
 pub fn mono(s: impl Into<String>, size: f32) -> RichText {
-    text(s, size, REGULAR)
+    RichText::new(s).family(FontFamily::Monospace).size(size).variation(b"wght", REGULAR)
 }
 
 pub fn title(s: impl Into<String>, size: f32) -> RichText {

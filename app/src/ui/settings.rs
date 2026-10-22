@@ -13,7 +13,7 @@ use crate::login::{self, LOGIN_ITEMS_URL, LoginStatus};
 use crate::paths::{self, APP_NAME, BUNDLE_ID};
 use crate::runtime::{self, EngineState, Runtime};
 use crate::settings::{
-    AppRule, Animation, Layout as RowLayout, ModKey, Padding, RuleAction, Settings, SwipeDirection, WIDTHS, width_label,
+    AppRule, Animation, BORDER_COLORS, Layout as RowLayout, ModKey, Padding, RuleAction, Settings, SwipeDirection, WIDTHS, width_label,
 };
 use crate::setup;
 
@@ -49,17 +49,24 @@ const SCROLL_MODIFIERS: [(&str, &str); 6] = [
     ("rcmd", "Right ⌘ Command"),
 ];
 
+/// Hold to resize the window under the pointer by moving it: (engine value, label).
+const RESIZE_MODIFIERS: [(&str, &str); 4] =
+    [("", "Off"), ("ctrl + cmd", "⌃⌘ Control-Command"), ("alt + shift", "⌥⇧ Option-Shift"), ("cmd + shift", "⌘⇧ Command-Shift")];
+
 /// (group, title, shift, keys, columns only)
-const SHORTCUTS: [(&str, &str, bool, &[&str], bool); 17] = [
+const SHORTCUTS: [(&str, &str, bool, &[&str], bool); 20] = [
     ("Focus", "Focus left", false, &["H", "←"], false),
     ("Focus", "Focus right", false, &["L", "→"], false),
     ("Focus", "Focus up", false, &["K", "↑"], false),
     ("Focus", "Focus down", false, &["J", "↓"], false),
     ("Move", "Move left", true, &["H", "←"], false),
     ("Move", "Move right", true, &["L", "→"], false),
+    ("Move", "Move up in a stack", true, &["K", "↑"], true),
+    ("Move", "Move down in a stack", true, &["J", "↓"], true),
     ("Size", "Cycle width", false, &["R"], true),
     ("Size", "Shrink width", true, &["R"], true),
     ("Size", "Full width", false, &["F"], true),
+    ("Size", "Balance widths", false, &["="], true),
     ("Size", "Center window", false, &["C"], true),
     ("Windows", "Float / tile", false, &["T"], false),
     ("Windows", "Show column as tabs", true, &["T"], true),
@@ -335,6 +342,15 @@ impl SettingsApp {
             row(ui, "Mouse follows focus", Some("The pointer jumps to the focused window"), None, |ui| {
                 theme::toggle(ui, &mut self.s.mouse_follows_focus);
             });
+            hairline(ui);
+            row(ui, "Resize with the pointer", Some("Hold these keys and move the pointer near a window's edge"), None, |ui| {
+                let current = RESIZE_MODIFIERS.iter().find(|m| m.0 == self.s.resize_modifier).map_or("Off", |m| m.1);
+                egui::ComboBox::from_id_salt("resize-modifier").width(190.0).selected_text(current).show_ui(ui, |ui| {
+                    for (value, label) in RESIZE_MODIFIERS {
+                        ui.selectable_value(&mut self.s.resize_modifier, value.to_string(), label);
+                    }
+                });
+            });
         });
     }
 
@@ -415,6 +431,28 @@ impl SettingsApp {
             row(ui, "Dim inactive windows", Some("Darken every window except the focused one"), None, |ui| {
                 theme::toggle(ui, &mut self.s.dim_inactive_windows);
             });
+            if self.s.dim_inactive_windows {
+                hairline(ui);
+                row(ui, "Dim strength", None, None, |ui| {
+                    ui.label(theme::caption("Dark"));
+                    theme::slider(ui, &mut self.s.dim_strength, 0.05, 0.4, 180.0);
+                    ui.label(theme::caption("Light"));
+                });
+            }
+            hairline(ui);
+            row(ui, "Focus border", Some("Outline the focused window"), Some("Beta"), |ui| {
+                theme::toggle(ui, &mut self.s.focus_border_enabled);
+            });
+            if self.s.focus_border_enabled {
+                hairline(ui);
+                row_below(ui, "Border color", None, None, |ui| {
+                    for (hex, name) in BORDER_COLORS {
+                        if theme::chip(ui, name, self.s.focus_border_color.eq_ignore_ascii_case(hex)).clicked() {
+                            self.s.focus_border_color = hex.to_string();
+                        }
+                    }
+                });
+            }
         });
     }
 
@@ -453,6 +491,24 @@ impl SettingsApp {
                     theme::slider(ui, &mut self.s.swipe_sensitivity, 0.1, 2.0, 180.0);
                     ui.label(theme::caption("Slow"));
                 });
+                hairline(ui);
+                row(ui, "Glide", Some("How far the row keeps sliding after you lift your fingers"), None, |ui| {
+                    // Trailing widgets lay out right to left. More glide is to the
+                    // right, which is less deceleration.
+                    ui.label(theme::caption("Long"));
+                    let mut glide = 11.0 - self.s.swipe_deceleration;
+                    if theme::slider(ui, &mut glide, 1.0, 10.0, 180.0).changed() {
+                        self.s.swipe_deceleration = 11.0 - glide;
+                    }
+                    ui.label(theme::caption("Short"));
+                });
+            });
+        });
+
+        section(ui, "Edges");
+        card(ui, |ui| {
+            row(ui, "Stop at the first and last window", Some("The row won't slide past either end into empty desktop"), None, |ui| {
+                theme::toggle(ui, &mut self.s.swipe_stop_at_ends);
             });
         });
 
@@ -484,6 +540,7 @@ impl SettingsApp {
             });
         });
         let canvas = self.s.layout() == RowLayout::Canvas;
+        let next_row = self.s.virtual_workspaces_enabled && !canvas;
         let mod_sym = self.s.mod_key.symbol();
         for group in ["Focus", "Move", "Size", "Windows", "Stacks"] {
             section(ui, group);
@@ -494,6 +551,12 @@ impl SettingsApp {
                         hairline(ui);
                     }
                     let title = if *cols_only && canvas { format!("{title} (not used in Canvas)") } else { title.to_string() };
+                    // With workspace rows, up and down carry on to the next row.
+                    let title = match title.as_str() {
+                        "Focus up" if next_row => "Focus up, then the row above".to_string(),
+                        "Focus down" if next_row => "Focus down, then the row below".to_string(),
+                        _ => title,
+                    };
                     shortcut_row(ui, &title, mod_sym, *shift, keys);
                 }
             });
@@ -544,6 +607,10 @@ impl SettingsApp {
                 hairline(ui);
                 row(ui, "Create workspaces automatically", Some("Moving past the last workspace adds a new one"), None, |ui| {
                     theme::toggle(ui, &mut self.s.create_workspaces_automatically);
+                });
+                hairline(ui);
+                row(ui, "Animate switching", Some("Slide between rows instead of switching instantly"), None, |ui| {
+                    theme::toggle(ui, &mut self.s.animate_workspace_switch);
                 });
             });
         });

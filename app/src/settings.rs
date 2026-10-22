@@ -145,7 +145,40 @@ pub struct Settings {
     pub start_at_login: bool,
     pub app_rules: Vec<AppRule>,
     pub use_custom_config_file: bool,
+    // Added after 1.0; older files lack them, so each has a default.
+    /// How quickly the row stops coasting after a swipe (1 glides far, 10 stops short).
+    #[serde(default = "default_swipe_deceleration")]
+    pub swipe_deceleration: f64,
+    /// The row can't slide past the first or last window.
+    #[serde(default)]
+    pub swipe_stop_at_ends: bool,
+    /// Slide between workspace rows instead of switching instantly.
+    #[serde(default)]
+    pub animate_workspace_switch: bool,
+    /// How dark inactive windows get (0.05 to 0.4).
+    #[serde(default = "default_dim_strength")]
+    pub dim_strength: f64,
+    /// Hex color of the focus border.
+    #[serde(default = "default_focus_border_color")]
+    pub focus_border_color: String,
+    /// Hold these keys and move the pointer to resize a window; empty is off.
+    #[serde(default)]
+    pub resize_modifier: String,
 }
+
+fn default_swipe_deceleration() -> f64 {
+    4.0
+}
+fn default_dim_strength() -> f64 {
+    0.15
+}
+fn default_focus_border_color() -> String {
+    BORDER_COLORS[0].0.into()
+}
+
+/// Focus border colors offered in Settings: (hex, name).
+pub const BORDER_COLORS: [(&str, &str); 6] =
+    [("#0A84FF", "Blue"), ("#BF5AF2", "Purple"), ("#FF375F", "Pink"), ("#FF9F0A", "Orange"), ("#30D158", "Green"), ("#FFFFFF", "White")];
 
 impl Default for Settings {
     fn default() -> Self {
@@ -172,6 +205,12 @@ impl Default for Settings {
             start_at_login: true,
             app_rules: vec![],
             use_custom_config_file: false,
+            swipe_deceleration: default_swipe_deceleration(),
+            swipe_stop_at_ends: false,
+            animate_workspace_switch: false,
+            dim_strength: default_dim_strength(),
+            focus_border_color: default_focus_border_color(),
+            resize_modifier: String::new(),
         }
     }
 }

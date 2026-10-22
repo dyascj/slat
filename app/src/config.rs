@@ -60,11 +60,15 @@ fn bindings(s: &Settings) -> Vec<(String, Vec<String>)> {
     let two = |k: &str, mods: &str, a: &str, b: &str| {
         (k.to_string(), vec![format!("{mods} - {a}"), format!("{mods} - {b}")])
     };
+    // With workspace rows, up and down keep going: within a stack first,
+    // then to the row above or below.
+    let rows = s.virtual_workspaces_enabled && s.layout() != Layout::Canvas;
+    let (north, south) = if rows { ("window_virtualfocus_north", "window_virtualfocus_south") } else { ("window_focus_north", "window_focus_south") };
     let mut out = vec![
         two("window_focus_west", m, "h", "leftarrow"),
         two("window_focus_east", m, "l", "rightarrow"),
-        two("window_focus_north", m, "k", "uparrow"),
-        two("window_focus_south", m, "j", "downarrow"),
+        two(north, m, "k", "uparrow"),
+        two(south, m, "j", "downarrow"),
         two("window_swap_west", &sh, "h", "leftarrow"),
         two("window_swap_east", &sh, "l", "rightarrow"),
         two("window_swap_north", &sh, "k", "uparrow"),
@@ -80,6 +84,7 @@ fn bindings(s: &Settings) -> Vec<(String, Vec<String>)> {
         one("window_unstack_west", &sh, "leftbracket"),
         one("window_unstack_east", &sh, "rightbracket"),
         one("window_nextdisplay", m, "n"),
+        one("window_balance", m, "equal"),
     ];
     if s.virtual_workspaces_enabled && s.virtual_workspace_count > 0 {
         let n = s.virtual_workspace_count.min(9);
@@ -118,6 +123,12 @@ pub fn toml(s: &Settings) -> String {
         "create_virtual_workspace_automatically = {}",
         s.virtual_workspaces_enabled && s.create_workspaces_automatically
     ));
+    if s.animate_workspace_switch {
+        line("virtual_workspace_animations = true".into());
+    }
+    if !s.resize_modifier.is_empty() {
+        line(format!("mouse_resize_modifier = {}", quote(&s.resize_modifier)));
+    }
 
     line(String::new());
     line("[padding]".into());
@@ -128,6 +139,12 @@ pub fn toml(s: &Settings) -> String {
     line(String::new());
     line("[swipe]".into());
     line(format!("sensitivity = {}", float(s.swipe_sensitivity.clamp(0.1, 2.0))));
+    if (s.swipe_deceleration - default_deceleration()).abs() > 1e-9 {
+        line(format!("deceleration = {}", float(s.swipe_deceleration.clamp(1.0, 10.0))));
+    }
+    if s.swipe_stop_at_ends {
+        line("continuous = false".into());
+    }
     line(String::new());
     line("[swipe.gesture]".into());
     if s.swipe_enabled {
@@ -146,12 +163,18 @@ pub fn toml(s: &Settings) -> String {
     line("workspace_menu_status = false".into());
     line(String::new());
     line("[decorations.active.border]".into());
-    line("enabled = false".into());
+    line(format!("enabled = {}", s.focus_border_enabled));
+    if s.focus_border_enabled {
+        line(format!("color = {}", quote(&s.focus_border_color)));
+        line("width = 3.0".into());
+    }
     if s.dim_inactive_windows {
+        // Native dimming: negative opacity, a little deeper in Dark Mode.
+        let d = s.dim_strength.clamp(0.05, 0.4);
         line(String::new());
         line("[decorations.inactive.dim]".into());
-        line("opacity = -0.15".into());
-        line("opacity_night = -0.25".into());
+        line(format!("opacity = {}", float(-d)));
+        line(format!("opacity_night = {}", float(-(d + 0.1))));
     }
 
     line(String::new());
@@ -206,6 +229,10 @@ pub fn toml(s: &Settings) -> String {
     o
 }
 
+fn default_deceleration() -> f64 {
+    Settings::default().swipe_deceleration
+}
+
 /// Regenerates engine.toml unless the user edits it by hand.
 pub fn apply(s: &Settings) -> std::io::Result<()> {
     if s.use_custom_config_file {
@@ -258,6 +285,29 @@ mod tests {
         assert!(t.contains("[windows.app_com_a_b]\ntitle = \".*\"\nbundle_id = \"com.a.B\"\nfloating = true\n"));
         assert!(t.contains("[windows.app_com_a_b_2]\ntitle = \".*\"\nbundle_id = \"com.a.b\"\nwidth = 0.66\n"));
         assert!(t.contains("window_focus_west = [\"ctrl + alt - h\", \"ctrl + alt - leftarrow\"]"));
+        assert!(t.contains("window_focus_north = "), "canvas keeps plain focus up/down");
         toml::from_str::<toml::Value>(&t).expect("valid toml");
+
+        let s = Settings {
+            swipe_deceleration: 7.0,
+            swipe_stop_at_ends: true,
+            animate_workspace_switch: true,
+            dim_inactive_windows: true,
+            dim_strength: 0.3,
+            focus_border_enabled: true,
+            focus_border_color: "#FF375F".into(),
+            resize_modifier: "cmd + shift".into(),
+            ..Settings::default()
+        };
+        let t = toml(&s);
+        assert!(t.contains("deceleration = 7.0\ncontinuous = false\n"));
+        assert!(t.contains("virtual_workspace_animations = true\n"));
+        assert!(t.contains("mouse_resize_modifier = \"cmd + shift\"\n"));
+        assert!(t.contains("[decorations.active.border]\nenabled = true\ncolor = \"#FF375F\"\nwidth = 3.0\n"));
+        assert!(t.contains("opacity = -0.3\nopacity_night = -0.4\n"));
+        assert!(t.contains("window_virtualfocus_north = [\"ctrl + alt - k\", \"ctrl + alt - uparrow\"]"), "rows: up/down reach the next row");
+        assert!(t.contains("window_balance = \"ctrl + alt - equal\""));
+        let parsed = toml::from_str::<toml::Value>(&t).expect("valid toml");
+        assert_eq!(parsed["swipe"]["deceleration"].as_float(), Some(7.0));
     }
 }

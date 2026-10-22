@@ -422,7 +422,7 @@ impl Config {
     // values collapse to an instant snap.
     // Suggested range: 8..20 for a fluid feel. Unset = instant (no animation),
     pub fn animation_speed(&self) -> f64 {
-        self.options()
+        self.inner().options
             .animation_speed
             // If unset, set it to something high, so the move happens immediately,
             // effectively disabling animation.
@@ -531,11 +531,11 @@ impl Config {
     }
 
     pub fn sliver_height(&self) -> f64 {
-        self.options().sliver_height.unwrap_or(1.0).clamp(0.1, 1.0)
+        self.inner().options.sliver_height.unwrap_or(1.0).clamp(0.1, 1.0)
     }
 
     pub fn sliver_width(&self) -> i32 {
-        i32::from(self.options().sliver_width.unwrap_or(5)).max(1)
+        i32::from(self.inner().options.sliver_width.unwrap_or(5)).max(1)
     }
 
     pub fn edge_padding(&self) -> (i32, i32, i32, i32) {
@@ -551,11 +551,11 @@ impl Config {
     }
 
     pub fn preset_column_widths(&self) -> Vec<f64> {
-        self.options().preset_column_widths
+        self.inner().options.preset_column_widths.clone()
     }
 
     pub fn preset_stack_heights(&self) -> Vec<f64> {
-        self.options().preset_stack_heights
+        self.inner().options.preset_stack_heights.clone()
     }
 
     pub fn swipe_gesture_direction(&self) -> SwipeGestureDirection {
@@ -709,7 +709,7 @@ impl Config {
     }
 
     pub fn menubar_height(&self) -> Option<i32> {
-        self.options().menubar_height.map(i32::from)
+        self.inner().options.menubar_height.map(i32::from)
     }
 
     pub fn swipe_sensitivity(&self) -> f64 {
@@ -746,7 +746,7 @@ impl Config {
     }
 
     pub fn mouse_resize_modifier(&self) -> Option<Modifiers> {
-        self.options().mouse_resize_modifier
+        self.inner().options.mouse_resize_modifier
     }
 
     pub fn restore_enabled(&self) -> bool {
@@ -838,18 +838,18 @@ impl Config {
     /// forces it into view. 0.0 = always bring into view (eager),
     /// 1.0 = never move unless fully invisible (lazy). Default: 0.0.
     pub fn window_hidden_ratio(&self) -> f64 {
-        self.options()
+        self.inner().options
             .window_hidden_ratio
             .unwrap_or(0.0)
             .clamp(0.0, 1.0)
     }
 
     pub fn window_resize_cycle(&self) -> bool {
-        self.options().window_resize_cycle.unwrap_or(true)
+        self.inner().options.window_resize_cycle.unwrap_or(true)
     }
 
     pub fn auto_center(&self) -> bool {
-        self.options().auto_center.is_some_and(|center| center)
+        self.inner().options.auto_center.is_some_and(|center| center)
     }
 
     /// The layout engine selected by `[options] layout`.
@@ -863,30 +863,30 @@ impl Config {
     }
 
     pub fn horizontal_mouse_warp(&self) -> Option<i16> {
-        self.options().horizontal_mouse_warp
+        self.inner().options.horizontal_mouse_warp
     }
 
     /// Returns `true` if focus should follow the mouse based on the current configuration.
     /// If the configuration option is not set, it defaults to `true`.
     pub fn focus_follows_mouse(&self) -> bool {
         // Default is enabled.
-        self.options().focus_follows_mouse.is_none_or(|ffm| ffm)
+        self.inner().options.focus_follows_mouse.is_none_or(|ffm| ffm)
     }
 
     /// Returns `true` if the mouse cursor should follow the focused window based on the current configuration.
     /// If the configuration option is not set, it defaults to `true`.
     pub fn mouse_follows_focus(&self) -> bool {
         // Default is enabled.
-        self.options().mouse_follows_focus.is_none_or(|mff| mff)
+        self.inner().options.mouse_follows_focus.is_none_or(|mff| mff)
     }
 
     pub fn horizontal_mouse_warp_offset(&self) -> i32 {
-        self.options().horizontal_mouse_warp_offset.unwrap_or(0)
+        self.inner().options.horizontal_mouse_warp_offset.unwrap_or(0)
     }
 
     pub fn reap_empty_workspaces(&self) -> bool {
         // Default is disabled..
-        self.options()
+        self.inner().options
             .reap_empty_workspaces
             .is_some_and(|reap| reap)
     }
@@ -917,7 +917,7 @@ impl Config {
 
     pub fn virtual_workspace_animations(&self) -> bool {
         // Default is disabled
-        self.options()
+        self.inner().options
             .virtual_workspace_animations
             .is_some_and(|enabled| enabled)
     }
@@ -932,13 +932,13 @@ impl Config {
     pub fn insert_windows_mid_strip(&self) -> bool {
         // Default is disabled: appending to the end of the strip is the
         // expected behaviour, especially when moving several windows.
-        self.options()
+        self.inner().options
             .insert_windows_mid_strip
             .is_some_and(|enabled| enabled)
     }
 
     pub fn create_workspace_automatically(&self) -> bool {
-        self.options()
+        self.inner().options
             .create_virtual_workspace_automatically
             .is_some_and(|enabled| enabled)
     }

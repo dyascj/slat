@@ -185,6 +185,8 @@ pub fn register_systems(app: &mut bevy::app::App) {
         |added: Query<(), Added<LayoutStrip>>, mut removed: RemovedComponents<LayoutStrip>| {
             !added.is_empty() || removed.read().next().is_some()
         };
+    // Housekeeping that makes AX calls waits until nothing is sliding.
+    let settled = |moving: Query<(), bevy::ecs::query::Or<(With<RepositionMarker>, With<ResizeMarker>)>>| moving.is_empty();
     let native_tabs_enabled =
         |config: Option<Res<Config>>| config.is_none_or(|config| config.native_tabs_enabled());
 
@@ -257,6 +259,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
                 .run_if(on_timer(CLOSED_WINDOW_CHECK_FREQ)),
             systems::regroup_stray_native_tabs
                 .run_if(native_tabs_enabled)
+                .run_if(settled)
                 .run_if(not(resource_exists::<Initializing>))
                 .run_if(on_timer(CLOSED_WINDOW_CHECK_FREQ)),
             systems::auto_discover_unmanaged_focused_windows,
@@ -355,7 +358,10 @@ pub fn register_systems(app: &mut bevy::app::App) {
                     .run_if(not(systems::overlay_decorations_enabled)),
             )
                 .chain(),
+            // Under the Slat app the engine's status item is hidden; the app
+            // shows its own, so redrawing this one is wasted work.
             crate::menubar::update_menu_bar
+                .run_if(|| !crate::util::embedded())
                 .run_if(menu_bar_dirty.or_eager(strip_count_changed)),
         )
             .in_set(PostUpdateSet::Ui),

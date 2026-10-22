@@ -415,6 +415,8 @@ enum ObserverType {
 #[derive(Clone, Copy, Debug)]
 enum WindowNotification {
     Focused,
+    /// Focus moved between controls; only news if it landed in another window.
+    FocusedElement,
     Moved,
     Resized,
     MenuOpened,
@@ -424,8 +426,8 @@ enum WindowNotification {
 impl WindowNotification {
     fn from_name(notification: &str) -> Option<Self> {
         match notification {
-            accessibility_sys::kAXFocusedWindowChangedNotification
-            | accessibility_sys::kAXFocusedUIElementChangedNotification => Some(Self::Focused),
+            accessibility_sys::kAXFocusedWindowChangedNotification => Some(Self::Focused),
+            accessibility_sys::kAXFocusedUIElementChangedNotification => Some(Self::FocusedElement),
             accessibility_sys::kAXWindowMovedNotification => Some(Self::Moved),
             accessibility_sys::kAXWindowResizedNotification => Some(Self::Resized),
             accessibility_sys::kAXMenuOpenedNotification => Some(Self::MenuOpened),
@@ -436,7 +438,7 @@ impl WindowNotification {
 
     fn into_event(self, window_id: WinID) -> Event {
         match self {
-            Self::Focused => Event::WindowFocused { window_id },
+            Self::Focused | Self::FocusedElement => Event::WindowFocused { window_id },
             Self::Moved => Event::WindowMoved { window_id },
             Self::Resized => Event::WindowResized { window_id },
             Self::MenuOpened => Event::MenuOpened { window_id },
@@ -471,10 +473,23 @@ impl WindowResolver {
         thread::Builder::new()
             .name("ax-window-resolver".into())
             .spawn(move || {
+                let mut last_focused = None;
                 for pending in rx {
                     match ax_window_id(pending.element.as_ptr()) {
                         Ok(window_id) => {
-                            _ = events.send(pending.kind.into_event(window_id));
+                            // Tabbing between text fields or a web page moving
+                            // its focus fires for every control; inside the
+                            // window that already has focus it changes nothing,
+                            // and each one cost a full focus pass in the engine.
+                            let kind = pending.kind;
+                            let repeat = matches!(kind, WindowNotification::FocusedElement)
+                                && last_focused == Some(window_id);
+                            if matches!(kind, WindowNotification::Focused | WindowNotification::FocusedElement) {
+                                last_focused = Some(window_id);
+                            }
+                            if !repeat {
+                                _ = events.send(kind.into_event(window_id));
+                            }
                         }
                         Err(err) => debug!("naming window for {:?}: {err}", pending.kind),
                     }

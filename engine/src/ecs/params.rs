@@ -216,6 +216,18 @@ impl FrameActivity<'_, '_> {
             || !self.scrolling.is_empty()
             || !self.flash_messages.is_empty()
     }
+
+    /// Whether windows or the row are actually moving. A flash message alone
+    /// doesn't count: it shouldn't hold back work that waits for things to settle.
+    pub fn moving(&self) -> bool {
+        !self.repositioning.is_empty() || !self.resizing.is_empty() || !self.scrolling.is_empty()
+    }
+
+    /// Whether the row is scrolling (a swipe or its coast), which steps every
+    /// loop turn rather than on the animation clock.
+    pub fn scrolling(&self) -> bool {
+        !self.scrolling.is_empty()
+    }
 }
 
 /// Bundles the window queries, config, and a command buffer that most

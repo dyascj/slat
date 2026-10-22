@@ -32,7 +32,7 @@ use super::world::{DispatchWorld, WorldAccess};
 use crate::commands::Command;
 use crate::config::Config;
 use crate::ecs::state::PaneruQueryState;
-use crate::platform::input::set_lua_keybinds;
+use crate::platform::input::{set_lua_keybinds, set_lua_wants_mouse};
 use crate::types::script_state::{ScriptState, ScriptStateWrite, WriteOutcome};
 use crate::types::windowset::WindowSet;
 
@@ -380,7 +380,7 @@ fn run(
         Arc::clone(revision),
     ));
     let loaded = load(source, &world);
-    subscribed_events.store(loaded.subscribed_event_mask(), Ordering::Relaxed);
+    publish_mask(subscribed_events, loaded.subscribed_event_mask());
     if let Some(config) = loaded.built_config() {
         publish_config(built_config, config);
     }
@@ -457,7 +457,7 @@ fn run(
                         *current.borrow_mut() = Rc::new(rebuilt);
                     }
                     let current_ref = current.borrow();
-                    subscribed_events.store(current_ref.subscribed_event_mask(), Ordering::Relaxed);
+                    publish_mask(subscribed_events, current_ref.subscribed_event_mask());
                 }
                 ToLua::Shutdown => break,
             }
@@ -488,8 +488,8 @@ impl Task<'_> {
         for (message, duration) in flashes {
             flash(&self.to_main, message, duration);
         }
-        self.subscribed_events
-            .store(self.runtime.subscribed_event_mask(), Ordering::Relaxed);
+        // Handlers can subscribe or unsubscribe while running.
+        publish_mask(self.subscribed_events, self.runtime.subscribed_event_mask());
     }
 }
 
@@ -1707,4 +1707,12 @@ mod tests {
             "AXWindow/AXStandardWindow"
         );
     }
+}
+
+/// Publishes which events the script listens for, and tells the event tap
+/// whether pointer moves are worth forwarding.
+fn publish_mask(subscribed_events: &AtomicU64, mask: u64) {
+    subscribed_events.store(mask, Ordering::Relaxed);
+    let mouse = LuaEvent::bit_for_name("mouse_moved") | LuaEvent::bit_for_name("mouse_dragged");
+    set_lua_wants_mouse(mask & mouse != 0);
 }

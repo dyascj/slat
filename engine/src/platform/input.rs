@@ -158,6 +158,13 @@ impl<I> SwipeAccumulator<I> {
 /// Keybinds registered by the Lua runtime as `(keycode, modifiers, handler_id)`,
 /// shared lock-free with the event tap. Checked before the config bindings so a
 /// scripted bind can override a TOML one.
+/// Set while a Lua script listens for pointer moves or drags.
+static LUA_WANTS_MOUSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_lua_wants_mouse(on: bool) {
+    LUA_WANTS_MOUSE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 static LUA_KEYBINDS: LazyLock<ArcSwap<Vec<(u8, Modifiers, u32)>>> =
     LazyLock::new(|| ArcSwap::from_pointee(Vec::new()));
 
@@ -431,10 +438,19 @@ impl InputHandler {
                 events.send(Event::MouseUp { point, modifiers })
             }
             CGEventType::LeftMouseDragged | CGEventType::RightMouseDragged => {
+                // Only scripts read drags.
+                if !LUA_WANTS_MOUSE.load(std::sync::atomic::Ordering::Relaxed) {
+                    return false;
+                }
                 let point = CGEvent::location(Some(event));
                 events.send(Event::MouseDragged { point, modifiers })
             }
             CGEventType::MouseMoved => {
+                // Every pointer move on the system would wake the engine for a
+                // full frame; only forward them when something uses them.
+                if !self.wants_mouse_moves() {
+                    return false;
+                }
                 let point = CGEvent::location(Some(event));
                 events.send(Event::MouseMoved { point, modifiers })
             }
@@ -464,6 +480,15 @@ impl InputHandler {
     }
 
     /// Use the configured modifier to scroll the strip or select an adjacent window.
+    /// Focus follows mouse, resize-by-drag, pointer warp across displays, or a
+    /// script listening: the only things that read pointer moves.
+    fn wants_mouse_moves(&self) -> bool {
+        self.config.focus_follows_mouse()
+            || self.config.mouse_resize_modifier().is_some()
+            || self.config.horizontal_mouse_warp().is_some()
+            || LUA_WANTS_MOUSE.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     fn handle_scroll_wheel(&mut self, event: &CGEvent) -> bool {
         // Suppress scroll events shortly after a swipe gesture to prevent
         // the OS from scrolling windows underneath, including momentum scroll events

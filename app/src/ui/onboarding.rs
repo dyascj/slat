@@ -315,13 +315,15 @@ impl Onboarding {
         let f = self.fade();
         if now >= self.ax_next {
             let was = self.ax;
+            let first = self.ax_next == 0.0;
             self.ax = setup::ax_trusted();
             self.ax_next = now + 1.0;
-            if self.ax {
+            // Saved on the first check and on the change, not every second.
+            if self.ax && (first || !was) {
                 Prefs::update(|p| p.accessibility_was_granted = true);
-                if !was {
-                    self.advance_at = Some(now + 0.9);
-                }
+            }
+            if self.ax && !was {
+                self.advance_at = Some(now + 0.9);
             }
         }
         ui.ctx().request_repaint_after_secs(1.0);

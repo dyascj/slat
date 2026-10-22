@@ -32,7 +32,7 @@ pub struct DimParams {
 
 // ── DimView: fullscreen dark overlay with a transparent cutout + border ──
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct DimViewIvars {
     opacity: f32,
     dim_r: f64,
@@ -58,14 +58,14 @@ define_class!(
     #[unsafe(super(NSView))]
     #[thread_kind = MainThreadOnly]
     #[name = "PaneruDimView"]
-    #[ivars = DimViewIvars]
+    #[ivars = std::cell::Cell<DimViewIvars>]
     #[derive(Debug)]
     struct DimView;
 
     impl DimView {
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty_rect: NSRect) {
-            let ivars = self.ivars();
+            let ivars = &self.ivars().get();
             let bounds = self.bounds();
 
             // Fill the entire view with the dim color.
@@ -134,6 +134,37 @@ define_class!(
 
 impl DimView {
     fn new(mtm: MainThreadMarker, frame: NSRect, params: &DimParams) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(std::cell::Cell::new(Self::ivars_for(params)));
+        unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+
+    /// Swaps in new parameters. When only the cutout moved (every frame of a
+    /// slide), just the old and new holes are redrawn instead of the whole
+    /// screen: that was a full Retina-screen CPU redraw per display, per frame.
+    fn set_params(&self, params: &DimParams) {
+        let old = self.ivars().get();
+        let new = Self::ivars_for(params);
+        if old == new {
+            return;
+        }
+        self.ivars().set(new);
+        let moved_only = old.has_cutout
+            && new.has_cutout
+            && DimViewIvars { cutout_x: 0.0, cutout_y: 0.0, cutout_w: 0.0, cutout_h: 0.0, ..old }
+                == DimViewIvars { cutout_x: 0.0, cutout_y: 0.0, cutout_w: 0.0, cutout_h: 0.0, ..new };
+        if moved_only {
+            // The border straddles the edge and is antialiased: pad by its width.
+            let pad = new.border_width + 2.0;
+            let hole = |v: &DimViewIvars| NSRect::new(NSPoint::new(v.cutout_x - pad, v.cutout_y - pad), NSSize::new(v.cutout_w + 2.0 * pad, v.cutout_h + 2.0 * pad));
+            self.setNeedsDisplayInRect(hole(&old));
+            self.setNeedsDisplayInRect(hole(&new));
+        } else {
+            self.setNeedsDisplay(true);
+        }
+        self.displayIfNeeded();
+    }
+
+    fn ivars_for(params: &DimParams) -> DimViewIvars {
         let (has_cutout, cx, cy, cw, ch) = params.cutout.map_or((false, 0.0, 0.0, 0.0, 0.0), |r| {
             (true, r.origin.x, r.origin.y, r.size.width, r.size.height)
         });
@@ -146,7 +177,7 @@ impl DimView {
                         true, b.color.0, b.color.1, b.color.2, b.opacity, b.width, b.radius,
                     )
                 });
-        let this = Self::alloc(mtm).set_ivars(DimViewIvars {
+        DimViewIvars {
             opacity: params.opacity,
             dim_r: params.color.0,
             dim_g: params.color.1,
@@ -163,8 +194,7 @@ impl DimView {
             border_opacity: bo,
             border_width: bw,
             border_radius: brad,
-        });
-        unsafe { msg_send![super(this), initWithFrame: frame] }
+        }
     }
 }
 
@@ -243,7 +273,7 @@ pub struct OverlayManager {
     /// window span multiple displays (with "Displays have separate Spaces" it
     /// renders on only one), so each screen gets its own overlay drawn in that
     /// screen's local coordinates. Indexed in lockstep with `NSScreen::screens`.
-    overlays: Vec<(Retained<NSWindow>, DimParams)>,
+    overlays: Vec<(Retained<NSWindow>, Retained<DimView>, DimParams)>,
     hidden: bool,
 }
 
@@ -274,7 +304,7 @@ impl OverlayManager {
 
         // A display was added/removed — tear down and rebuild from scratch.
         if self.overlays.len() != screens.len() {
-            for (window, _) in self.overlays.drain(..) {
+            for (window, _, _) in self.overlays.drain(..) {
                 window.orderOut(None::<&AnyObject>);
             }
         }
@@ -304,14 +334,11 @@ impl OverlayManager {
                 border: border.cloned(),
             };
 
-            if let Some((window, stored)) = self.overlays.get_mut(i) {
-                if *stored == params {
-                    // Keep geometry in sync cheaply (no forced redraw).
-                    window.setFrame_display(frame, false);
-                } else {
-                    let view = DimView::new(self.mtm, frame, &params);
-                    window.setContentView(Some(&view));
-                    window.setFrame_display(frame, true);
+            if let Some((window, view, stored)) = self.overlays.get_mut(i) {
+                // Keep geometry in sync cheaply (no forced redraw).
+                window.setFrame_display(frame, false);
+                if *stored != params {
+                    view.set_params(&params);
                     *stored = params;
                 }
                 if self.hidden {
@@ -322,7 +349,7 @@ impl OverlayManager {
                 let view = DimView::new(self.mtm, frame, &params);
                 window.setContentView(Some(&view));
                 window.orderFront(None::<&AnyObject>);
-                self.overlays.push((window, params));
+                self.overlays.push((window, view, params));
             }
         }
         self.hidden = false;
@@ -334,7 +361,7 @@ impl OverlayManager {
     }
 
     pub fn remove_all(&mut self) {
-        for (window, _) in self.overlays.drain(..) {
+        for (window, _, _) in self.overlays.drain(..) {
             window.orderOut(None::<&AnyObject>);
         }
         self.hidden = false;
@@ -344,7 +371,7 @@ impl OverlayManager {
         if self.hidden {
             return;
         }
-        for (window, _) in &self.overlays {
+        for (window, _, _) in &self.overlays {
             window.orderOut(None::<&AnyObject>);
         }
         self.hidden = true;

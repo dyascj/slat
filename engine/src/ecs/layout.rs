@@ -208,13 +208,13 @@ impl Plugin for LayoutEventsPlugin {
                     position_layout_windows,
                 )
                     .chain()
-                    .after(super::systems::finish_setup)
-                    .after(super::triggers::apply_window_positions)
-                    .before(super::workspace::show_active_workspace)
+                    .in_set(super::UpdateSet::Layout)
                     .run_if(not(resource_exists::<Initializing>)),
+                // After finish_setup so the startup windows are seen (and
+                // skipped) in the frame that drops `Initializing`.
                 canvas::canvas_mark_new_windows
-                    .after(super::triggers::apply_window_positions)
-                    .before(canvas::canvas_assign_desks),
+                    .in_set(super::UpdateSet::Spawn)
+                    .after(super::systems::finish_setup),
             ),
         );
         app.add_observer(canvas::canvas_window_unmanaged);

@@ -26,6 +26,7 @@ const SHORTCUTS: [&[Shortcut]; 4] = [
         ("Cycle Width", Code::KeyR, false, "window resize", true),
         ("Narrower", Code::KeyR, true, "window shrink", true),
         ("Full Width", Code::KeyF, false, "window fullwidth", true),
+        ("Balance Widths", Code::Equal, false, "window balance", true),
     ],
     &[
         ("Stack Left", Code::BracketLeft, false, "window stack west", true),

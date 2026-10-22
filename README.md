@@ -48,10 +48,11 @@ The default mod key is `⌃⌥`. Settings › Shortcuts switches it to `⌥` or 
 
 | Keys | Action |
 |---|---|
-| mod + `H` `J` `K` `L` or arrows | Focus left, down, up, right |
+| mod + `H` `J` `K` `L` or arrows | Focus left, down, up, right. With workspaces on, up and down carry on to the row above or below |
 | mod + `⇧` + `H` `J` `K` `L` or arrows | Move the window |
 | mod + `R` / mod + `⇧` + `R` | Cycle the width through your presets, or step it narrower |
 | mod + `F` | Full width |
+| mod + `=` | Balance: every column takes the focused window's width |
 | mod + `C` | Center the window |
 | mod + `T` | Float or tile the window |
 | mod + `⇧` + `T` | Show the column as tabs |
@@ -68,10 +69,12 @@ You can also swipe with four fingers, or hold `⌥` and turn the scroll wheel, t
 - **Columns layout.** New windows open at a width you pick (¼ to full). Cycle width steps through presets.
 - **Canvas layout.** One long desk. Windows keep their own size and position, and you slide the whole desk. Drag a window anywhere and it stays put. Positions are saved and come back after a restart.
 - **Virtual workspaces.** Up to nine rows per display, stacked one above the other inside one macOS Space, so switching is instant.
-- **Gestures.** Three- or four-finger swipes with natural or reversed direction and adjustable sensitivity.
+- **Gestures.** Three- or four-finger swipes with natural or reversed direction, adjustable sensitivity and glide, and an option to stop at the first and last window.
 - **App rules.** Make an app always float or open at a fixed width.
 - **Mac Setup check.** Slat watches for settings that break tiling, like Stage Manager, shared Spaces across displays, or another window manager running, and links to the fix.
-- **Focus follows mouse, mouse follows focus, dim inactive windows, gaps.**
+- **Focus follows mouse, mouse follows focus, gaps, dim inactive windows** with adjustable strength, and a **focus border** in your choice of color.
+- **Resize with the pointer.** Hold a key combination and move the pointer near a window's edge to resize it.
+- **Animated workspace switches**, if you'd rather see the rows slide.
 - **Custom config.** Flip one switch and edit the engine's `engine.toml` by hand. The engine reloads it on save. An existing Paneru config can be imported.
 
 Settings live in `~/Library/Application Support/Slat/`, and logs in `~/Library/Logs/Slat/`.

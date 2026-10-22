@@ -2,8 +2,10 @@ name: ci
 on: [push, pull_request]
 jobs:
   test:
-    runs-on: macos-latest
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
       - run: cd app && cargo test
-      - run: cd engine && cargo test
+      # One test at a time: on the hosted runner the parallel run aborts now
+      # and then (SIGABRT, no test named), while serial runs pass every time.
+      - run: cd engine && cargo test -- --test-threads=1

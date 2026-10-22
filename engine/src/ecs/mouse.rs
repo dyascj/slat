@@ -18,7 +18,7 @@ use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{GlobalState, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, DockPosition, MissionControlActive, Position, RepositionMarker,
-    Scrolling, SpawnCommandsExt,
+    Scrolling, SpawnCommandsExt, UpdateSet,
 };
 use bevy::ecs::schedule::common_conditions::on_message;
 
@@ -56,6 +56,7 @@ impl Plugin for MouseEventsPlugin {
                 mouse_up_trigger,
                 horizontal_warp_mouse_trigger,
             )
+                .in_set(UpdateSet::Input)
                 .run_if(on_message::<InputEvent>),
         );
     }

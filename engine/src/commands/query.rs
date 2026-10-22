@@ -424,8 +424,10 @@ fn state_event_broadcast_handler(
     pending.merge(StateBroadcastIntent::from_events(events, signals));
     // Extracting state queries the window server for every workspace, which
     // stalled sliding windows on every focus change. Subscribers only need the
-    // settled result, so hold the changes until nothing is moving.
-    if activity.mid_frame() {
+    // settled result, so hold the changes until nothing is moving. The
+    // workspace popup isn't movement: waiting it out made the menu bar's
+    // workspace number lag a second behind every switch.
+    if activity.moving() {
         return;
     }
     let intent = std::mem::take(&mut *pending);

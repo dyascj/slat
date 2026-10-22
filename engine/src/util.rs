@@ -31,7 +31,9 @@ use crate::{
 /// and the service lifecycle.
 #[must_use]
 pub fn embedded() -> bool {
-    std::env::var_os("SLAT_EMBEDDED").is_some_and(|v| v == "1")
+    // Fixed for the life of the process, and asked every frame.
+    static EMBEDDED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *EMBEDDED.get_or_init(|| std::env::var_os("SLAT_EMBEDDED").is_some_and(|v| v == "1"))
 }
 
 /// Converts a floating-point pixel measurement into whole pixels.

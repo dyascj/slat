@@ -94,6 +94,9 @@ const LOOP_MAX_TIMEOUT_LOWPOWER_MS: u32 = 2000;
 const LOOP_MAX_TIMEOUT_MS: u32 = 500;
 const TAP_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const LOOP_TIMEOUT_STEP: u32 = 1;
+/// How long after the last event or animation the loop keeps frame-rate
+/// turns before backing off.
+const IDLE_GRACE: Duration = Duration::from_secs(1);
 
 /// How long [`pump_events`] may spend draining the incoming channel before it
 /// has to hand the frame back, and how many events it may take in one go.
@@ -629,6 +632,13 @@ impl AnimationClock {
         self.last_step = None;
         self.step = None;
     }
+
+    /// Milliseconds until the next step is due, for the pump's wait; `None`
+    /// when nothing is animating.
+    fn ms_until_step(&self, now: Duration) -> Option<u32> {
+        let wait = (self.last_step? + self.interval).saturating_sub(now);
+        Some(u32::try_from(wait.as_millis()).unwrap_or(u32::MAX).max(LOOP_TIMEOUT_STEP))
+    }
 }
 
 fn display_refresh_hz() -> f64 {
@@ -812,7 +822,11 @@ pub(crate) fn pump_events(
     incoming_events: Option<NonSend<Receiver<Event>>>,
     platform: Option<NonSendMut<Pin<Box<PlatformCallbacks>>>>,
     activity: FrameActivity,
+    clock: Res<AnimationClock>,
+    time: Res<Time>,
+    timers: Query<&crate::ecs::Timeout>,
     mut timeout: Local<u32>,
+    mut last_active: Local<Option<Instant>>,
     mut last_tap_check: Local<Option<Instant>>,
 ) {
     let Some((ref mut platform, incoming_events)) = platform.zip(incoming_events) else {
@@ -867,19 +881,42 @@ pub(crate) fn pump_events(
     };
 
     received_events.extend(pending_mouse.take());
+    let got_events = !received_events.is_empty();
     messages.write_batch(received_events);
 
+    if got_events || activity.mid_frame() {
+        *last_active = Some(Instant::now());
+    }
     if drained {
-        let frame_active = activity.mid_frame();
         let low_power = low_power_mode.is_some_and(|low_power| low_power.0);
-        let timeout_limit = if frame_active {
-            LOOP_MAX_TIMEOUT_FRAME_ACTIVE_MS
-        } else if low_power {
-            LOOP_MAX_TIMEOUT_LOWPOWER_MS
+        *timeout = if activity.mid_frame() {
+            // Wake about when the next display frame is due, instead of
+            // creeping up from 1 ms (spinning) to 16 ms (half rate at 120 Hz).
+            // The clock is a frame behind here, so this errs early, never late.
+            // A coasting row steps per turn, so it gets display rate too; a
+            // flash message alone is fine at 60 Hz.
+            let fallback = if activity.scrolling() { (1000.0 / display_refresh_hz()) as u32 } else { LOOP_MAX_TIMEOUT_FRAME_ACTIVE_MS };
+            clock
+                .ms_until_step(time.elapsed())
+                .unwrap_or(fallback)
+                .clamp(LOOP_TIMEOUT_STEP, LOOP_MAX_TIMEOUT_FRAME_ACTIVE_MS)
+        } else if last_active.is_some_and(|t| t.elapsed() < IDLE_GRACE) {
+            // Just after activity, follow-up work (a resize scheduled 150 ms
+            // after a move, focus verification, retries) is likely; keep
+            // turning at frame rate so it isn't held back by a long sleep.
+            (*timeout + LOOP_TIMEOUT_STEP).min(LOOP_MAX_TIMEOUT_FRAME_ACTIVE_MS)
         } else {
-            LOOP_MAX_TIMEOUT_MS
+            // Real events wake the pump at once, so a settled engine can back
+            // off quickly: about ten turns to the cap rather than ~500. Never
+            // past the next pending timeout, though.
+            let limit = if low_power { LOOP_MAX_TIMEOUT_LOWPOWER_MS } else { LOOP_MAX_TIMEOUT_MS };
+            let next_timer = timers
+                .iter()
+                .map(|t| u32::try_from(t.timer.remaining().as_millis()).unwrap_or(u32::MAX))
+                .min()
+                .unwrap_or(u32::MAX);
+            timeout.saturating_mul(2).min(next_timer.saturating_add(1)).clamp(LOOP_TIMEOUT_STEP, limit)
         };
-        *timeout = timeout.min(timeout_limit) + LOOP_TIMEOUT_STEP;
     } else {
         // Still backed up: come straight back rather than sleeping on it.
         *timeout = LOOP_TIMEOUT_STEP;
@@ -1220,13 +1257,13 @@ pub(super) fn update_overlays(
 pub(super) fn commit_window_position(
     mut moved_windows: Populated<(&mut Window, &Position), Changed<Position>>,
 ) {
-    // `par_iter_mut` runs on `ComputeTaskPool` worker threads, which have no
-    // `CFRunLoop` of their own to drain thread-local autorelease pools.
-    moved_windows
-        .par_iter_mut()
-        .for_each(|(mut window, position)| {
-            objc2::rc::autoreleasepool(|_| window.reposition(position.0));
-        });
+    // `reposition` only queues the move for the app's mover thread, so a
+    // parallel iterator here was task-pool overhead for no gain.
+    objc2::rc::autoreleasepool(|_| {
+        for (mut window, position) in &mut moved_windows {
+            window.reposition(position.0);
+        }
+    });
 }
 
 #[instrument(level = Level::TRACE, skip_all)]
@@ -2113,5 +2150,15 @@ mod animation_clock_tests {
             clock.tick(t0 + Duration::from_millis(20), || unreachable!()),
             None
         );
+    }
+
+    #[test]
+    fn pump_waits_until_the_next_frame() {
+        let mut clock = AnimationClock::default();
+        let t0 = Duration::from_secs(5);
+        assert_eq!(clock.ms_until_step(t0), None, "nothing animating");
+        clock.tick(t0, || 120.0);
+        assert_eq!(clock.ms_until_step(t0 + Duration::from_millis(2)), Some(6));
+        assert_eq!(clock.ms_until_step(t0 + Duration::from_millis(30)), Some(1), "overdue still waits a little");
     }
 }

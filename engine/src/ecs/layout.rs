@@ -338,21 +338,29 @@ impl Column {
 
     /// Moves the specified entity to the front of stack-local ordering.
     /// Native tab ordering is stable; the focused tab is tracked by `FocusedMarker`.
-    pub fn move_to_front(&mut self, entity: Entity) {
+    /// Returns whether anything moved.
+    pub fn move_to_front(&mut self, entity: Entity) -> bool {
         match self {
-            Column::Single(_) | Column::Fullscren(_) => {}
+            Column::Single(_) | Column::Fullscren(_) => false,
             Column::Stack(stack) => {
                 if let Some(StackItem::Tabs(tabs)) =
                     stack.iter_mut().find(|item| item.contains(entity))
                     && let Some(pos) = tabs.iter().position(|&e| e == entity)
+                    && pos != 0
                 {
                     tabs.swap(0, pos);
+                    return true;
                 }
+                false
             }
             Column::Tabs(tabs) => {
-                if let Some(pos) = tabs.iter().position(|&e| e == entity) {
+                if let Some(pos) = tabs.iter().position(|&e| e == entity)
+                    && pos != 0
+                {
                     tabs.swap(0, pos);
+                    return true;
                 }
+                false
             }
         }
     }

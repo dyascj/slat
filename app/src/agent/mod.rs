@@ -41,6 +41,9 @@ pub struct Agent {
     ax_trusted: bool,
     badge_shown: bool,
     windows: HashMap<String, Proc>,
+    /// What the tray and runtime.json last showed, so an engine event that
+    /// changes neither (most focus moves) costs nothing.
+    shown: Option<(String, Runtime)>,
 }
 
 thread_local! {
@@ -164,6 +167,7 @@ fn init() {
         ax_trusted: ax_trusted(),
         badge_shown: false,
         windows: HashMap::new(),
+        shown: None,
     };
     AGENT.with(|cell| *cell.borrow_mut() = Some(agent));
     MenuEvent::set_event_handler(Some(|e: MenuEvent| {
@@ -229,8 +233,6 @@ impl Agent {
 
     /// Title, tooltip and runtime.json (cheap; runs on every engine event).
     fn status_changed(&mut self) {
-        let title = self.workspace.map(|w| w.to_string());
-        self.tray.set_title(title.as_deref());
         let mut label = "Slat".to_string();
         if let Some(w) = self.workspace {
             label += &format!(", workspace {w}");
@@ -238,19 +240,13 @@ impl Agent {
         if !self.ax_trusted {
             label += ", setup needs attention";
         }
-        let _ = self.tray.set_tooltip(Some(&label));
-        if let (Some(item), Some(mtm)) = (self.tray.ns_status_item(), MainThreadMarker::new())
-            && let Some(button) = item.button(mtm)
-        {
-            button.setAccessibilityLabel(Some(&NSString::from_str(&label)));
-        }
         let (engine, message) = match &self.engine.state {
             State::Running => (EngineState::Running, None),
             State::Stopped => (EngineState::Stopped, None),
             State::Crashed(m) => (EngineState::Crashed, Some(m.clone())),
         };
         let (update_available, update_status) = self.update.runtime();
-        Runtime {
+        let runtime = Runtime {
             pid: std::process::id() as i32,
             engine,
             message,
@@ -258,8 +254,22 @@ impl Agent {
             focused_app: self.focused_app.clone(),
             update_available,
             update_status,
+        };
+        let now = (label, runtime);
+        if self.shown.as_ref() == Some(&now) {
+            return;
         }
-        .write();
+        let (label, runtime) = &now;
+        let title = self.workspace.map(|w| w.to_string());
+        self.tray.set_title(title.as_deref());
+        let _ = self.tray.set_tooltip(Some(label));
+        if let (Some(item), Some(mtm)) = (self.tray.ns_status_item(), MainThreadMarker::new())
+            && let Some(button) = item.button(mtm)
+        {
+            button.setAccessibilityLabel(Some(&NSString::from_str(label)));
+        }
+        runtime.write();
+        self.shown = Some(now);
     }
 
     fn apply(&mut self, u: engine::Update) {

@@ -98,6 +98,8 @@ pub enum UpdateSet {
     /// Tiling layout calculation (`LayoutEventsPlugin`).
     Layout,
     /// Post-layout workspace visibility restoration (`show_active_workspace`).
+    /// Kept after `Layout`: running it first lets a switch to an empty
+    /// virtual workspace bounce straight back to the previous one.
     Workspace,
     /// Timers, marker cleanup, state persistence, and Lua event forwarding.
     Housekeeping,

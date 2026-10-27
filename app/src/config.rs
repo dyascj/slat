@@ -188,8 +188,8 @@ pub fn toml(s: &Settings) -> String {
         line(format!("{k} = {value}"));
     }
 
-    let rule_sets_width = s.app_rules.iter().any(|r| matches!(r.action, RuleAction::Width { .. }));
-    if !canvas && !rule_sets_width {
+    // An app's width rule is more specific, so it still wins for that app.
+    if !canvas {
         line(String::new());
         line("[windows.slat_default_width]".into());
         line("title = \".*\"".into());
@@ -261,6 +261,19 @@ mod tests {
     fn matches_observed_output_byte_for_byte() {
         let s = Settings::parse(include_str!("../tests/fixtures/settings.json"));
         assert_eq!(toml(&s), include_str!("../tests/fixtures/engine.toml"));
+    }
+
+    #[test]
+    fn width_rule_keeps_default_width_for_other_apps() {
+        let mut s = Settings::default();
+        s.app_rules = vec![AppRule {
+            bundle_id: "com.a.b".into(),
+            app_name: "b".into(),
+            action: RuleAction::Width { w: 1.0 },
+        }];
+        let t = toml(&s);
+        assert!(t.contains("[windows.slat_default_width]"));
+        assert!(t.contains("bundle_id = \"com.a.b\"\nwidth = 1.0\n"));
     }
 
     #[test]

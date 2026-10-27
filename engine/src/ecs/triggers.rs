@@ -76,14 +76,46 @@ fn update_passthrough(window: &Window, app: &Application, config: &Config) {
 /// keys. Shared by the TOML reload trigger ([`refresh_configuration_trigger`])
 /// and the Lua reload system so both config sources behave identically on reload.
 pub(crate) fn apply_config_side_effects(
+    previous: &Config,
     config: &Config,
     displays: &mut Query<&mut Display>,
     windows: &Windows,
     applications: &Query<&Application>,
+    commands: &mut Commands,
 ) {
     let height = config.menubar_height();
     for mut display in &mut *displays {
         display.set_menubar_height_override(height);
+    }
+
+    // Rules are otherwise only checked when a window first appears, so a new
+    // "always float" rule would leave the app's open windows tiled. Only touch
+    // windows whose rule changed, so a window floated or tiled by hand keeps
+    // that choice across unrelated settings changes.
+    for (window, entity) in windows.iter() {
+        let Some(app) = windows
+            .find_parent(window.id())
+            .and_then(|(_, _, parent)| applications.get(parent).ok())
+        else {
+            continue;
+        };
+        let was = WindowProperties::new(app, window, previous).floating();
+        let now = WindowProperties::new(app, window, config).floating();
+        let Ok(mut entity_commands) = commands.get_entity(entity) else {
+            continue;
+        };
+        match windows
+            .get_managed(entity)
+            .map(|(_, _, unmanaged)| unmanaged)
+        {
+            Some(None) if now && !was => {
+                entity_commands.try_insert(Unmanaged::Floating);
+            }
+            Some(Some(Unmanaged::Floating)) if was && !now => {
+                entity_commands.try_remove::<Unmanaged>();
+            }
+            _ => {}
+        }
     }
 
     // Recompute passthrough keys for the currently focused window.
@@ -106,11 +138,13 @@ pub(crate) fn apply_config_side_effects(
 /// * `focused_window` - A query for the focused window.
 /// * `focus_follows_mouse_id` - The resource to track focus follows mouse window ID.
 /// * `commands` - Bevy commands to trigger events and manage components.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn front_switched_trigger(
     mut messages: MessageReader<Event>,
     processes: Query<(&BProcess, &Children)>,
     applications: Query<&Application>,
     verifying: Query<(&Window, &ChildOf), With<VerifyFocus>>,
+    focused: Query<(&Window, &ChildOf), With<FocusedMarker>>,
     window_manager: Res<WindowManager>,
     mut config: GlobalState,
     mut commands: Commands,
@@ -145,9 +179,17 @@ pub(super) fn front_switched_trigger(
         // When we just focused one of this app's windows, that is the answer.
         // Asking the app blocks until it finishes activating (50-100 ms seen),
         // which froze sliding windows; `detect_focus_rejection` still checks
-        // afterwards that the app really took the focus.
+        // afterwards that the app really took the focus. Focus follows mouse
+        // sets the focused window without `VerifyFocus`; asking then fails
+        // with kAXErrorNoValue or names the app's previous window, which slid
+        // the row there and back.
         let expected = verifying
             .iter()
+            .chain(
+                focused
+                    .iter()
+                    .filter(|(window, _)| under_cursor(&window_manager, window.id())),
+            )
             .find(|(_, child_of)| child_of.parent() == app_entity)
             .map(|(window, _)| window.id());
         let focused = expected.map_or_else(|| app.focused_window_id(), Ok);
@@ -181,6 +223,16 @@ pub(super) fn front_switched_trigger(
             commands.spawn((timeout, RetryFrontSwitch(app_entity)));
         }
     }
+}
+
+/// Whether `window_id` is the window under the pointer, the one focus follows
+/// mouse just picked. Native tabs share a frame, so this names the visible tab.
+fn under_cursor(window_manager: &WindowManager, window_id: WinID) -> bool {
+    window_manager.cursor_position().is_some_and(|point| {
+        window_manager
+            .find_window_at_point(&point)
+            .is_ok_and(|id| id == window_id)
+    })
 }
 
 pub(super) fn theme_change_trigger(
@@ -237,12 +289,14 @@ pub(super) fn theme_change_trigger(
 /// * `global_state` - Focus-follows-mouse and reshuffle flags.
 /// * `ctx` - Window queries, configuration and the command buffer.
 #[instrument(level = Level::DEBUG, skip_all)]
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub(super) fn window_focused_trigger(
     mut messages: MessageReader<Event>,
     applications: Query<&Application>,
     mut workspaces: Query<(Entity, &mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     restore_guards: Query<(Entity, &RestoreFocusMarker)>,
+    verifying: Query<(), With<VerifyFocus>>,
+    window_manager: Res<WindowManager>,
     mut focus_history: ResMut<FocusHistory>,
     global_state: GlobalState,
     mut ctx: WindowCtx,
@@ -288,7 +342,18 @@ pub(super) fn window_focused_trigger(
         // decided to show. Follow it to that window rather than dropping the
         // event: dropping it leaves the strip parked where it was, so Cmd-Tab
         // into a tabbed terminal looks like nothing happened.
-        let (window, entity, window_id) = match app.focused_window_id() {
+        // Skip asking when the event confirms the focus we just set (keyboard
+        // or mouse): the app answers only once it finishes activating, and
+        // waiting for it stalled the slide mid-way. Anything else still asks,
+        // since a tabbed app may have moved on to another tab.
+        let we_set_it = current_focused.is_some_and(|(_, id)| id == window_id)
+            && (verifying.contains(entity) || under_cursor(&window_manager, window_id));
+        let reported = if we_set_it {
+            Ok(window_id)
+        } else {
+            app.focused_window_id()
+        };
+        let (window, entity, window_id) = match reported {
             Ok(current) if current != window_id => {
                 match ctx.windows.find_parent(current) {
                     Some((current_window, current_entity, current_parent))
@@ -1263,18 +1328,10 @@ pub(super) fn apply_window_positions(
             continue;
         };
 
-        if crate::ecs::restore::matches_startup_restore_state(
-            window,
-            app,
-            restore.as_deref(),
-            restoration.as_deref(),
-            &ctx.config,
-        ) {
-            continue;
-        }
-
         let properties = WindowProperties::new(app, window, &ctx.config);
 
+        // Rules win over the saved session: restore only tracks tiled
+        // windows, so checking it first would tile an app that now floats.
         if properties.floating() {
             if let Some(mut strip) = workspaces
                 .iter_mut()
@@ -1286,6 +1343,16 @@ pub(super) fn apply_window_positions(
                 // Avoid managing window if it's floating.
                 entity_commands.try_insert(Unmanaged::Floating);
             }
+            continue;
+        }
+
+        if crate::ecs::restore::matches_startup_restore_state(
+            window,
+            app,
+            restore.as_deref(),
+            restoration.as_deref(),
+            &ctx.config,
+        ) {
             continue;
         }
 
@@ -1371,6 +1438,7 @@ fn config_change(kind: EventKind) -> ConfigChange {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn refresh_configuration_trigger(
     mut messages: MessageReader<Event>,
     window_manager: Res<WindowManager>,
@@ -1379,6 +1447,7 @@ pub(super) fn refresh_configuration_trigger(
     windows: Windows,
     mut displays: Query<&mut Display>,
     applications: Query<&Application>,
+    mut commands: Commands,
 ) {
     for event in messages.read() {
         let Event::ConfigRefresh(event) = event else {
@@ -1409,6 +1478,7 @@ pub(super) fn refresh_configuration_trigger(
             continue;
         }
 
+        let previous = config.snapshot();
         for path in &event.paths {
             // The Lua init script shares this watcher and `ConfigRefresh` event;
             // it is reloaded separately by `lua_reload_system`. Skip it here so
@@ -1443,7 +1513,14 @@ pub(super) fn refresh_configuration_trigger(
             });
         }
 
-        apply_config_side_effects(&config, &mut displays, &windows, &applications);
+        apply_config_side_effects(
+            &previous,
+            &config,
+            &mut displays,
+            &windows,
+            &applications,
+            &mut commands,
+        );
     }
 }
 

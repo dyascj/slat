@@ -248,8 +248,16 @@ pub fn drain_lua_outbox(
                 // Swap into the shared handle, then re-apply the same side
                 // effects a TOML reload does.
                 if let (Some(config), Some(built)) = (config.as_ref(), worker.built_config()) {
+                    let previous = config.snapshot();
                     config.replace_inner_from(&built);
-                    apply_config_side_effects(config, &mut displays, &windows, &applications);
+                    apply_config_side_effects(
+                        &previous,
+                        config,
+                        &mut displays,
+                        &windows,
+                        &applications,
+                        &mut commands,
+                    );
                 }
             }
         }

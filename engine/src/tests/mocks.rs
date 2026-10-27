@@ -190,6 +190,10 @@ impl MockState {
 
     /// Moves the app's focused window without emitting the notifications a
     /// real focus change would produce.
+    pub fn set_cursor_position(&self, position: Origin) {
+        self.inner.force_write().cursor_position = position;
+    }
+
     pub fn set_focused_window(&self, id: WinID) {
         let mut inner = self.inner.force_write();
         let Some(pid) = inner.windows.get(&id).map(|window| window.pid) else {

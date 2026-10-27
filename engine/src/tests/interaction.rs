@@ -1079,12 +1079,57 @@ fn test_focus_event_follows_the_window_the_app_says_is_focused() {
             assert_eq!(focused_window_id(world), 0);
             // The app has moved on to its other window without telling us.
             state.set_focused_window(1);
+            // Keep the pointer off the windows: the mock's hit test doesn't
+            // model native tabs, where the pointer would find the visible tab.
+            state.set_cursor_position(Origin::new(-1000, -1000));
         })
         .on_iteration(3, |world, _state| {
             assert_eq!(
                 focused_window_id(world),
                 1,
                 "the focus event must follow the app to the window it actually focused",
+            );
+        })
+        .run(commands);
+}
+
+/// Focus follows mouse sets the focused window before the app finishes
+/// activating, so the app can still name its previous window. The window under
+/// the pointer is the answer: following the app there slid the row to the old
+/// window and back, which showed as a flicker.
+#[test]
+fn test_mouse_focus_is_not_overridden_by_app_still_activating() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::WindowFocused { window_id: 1 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    TestHarness::new()
+        .with_windows(2)
+        .on_iteration(1, |world, state| {
+            assert_eq!(focused_window_id(world), 0);
+            let entity = find_window_entity(1, world);
+            let frame = world
+                .entity(entity)
+                .get::<Window>()
+                .expect("window 1")
+                .frame();
+            state.set_cursor_position(frame.center());
+            // What focus follows mouse does on hover; the app hasn't caught up.
+            world.entity_mut(entity).insert(crate::ecs::FocusedMarker);
+            state.set_focused_window(0);
+        })
+        .on_iteration(3, |world, _state| {
+            assert_eq!(
+                focused_window_id(world),
+                1,
+                "the hovered window keeps focus while the app is still activating",
             );
         })
         .run(commands);

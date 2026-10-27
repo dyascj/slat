@@ -391,6 +391,14 @@ impl Config {
         Ok(())
     }
 
+    /// A copy of the current settings that later reloads leave untouched, so a
+    /// reload can compare what changed.
+    pub(crate) fn snapshot(&self) -> Self {
+        Self {
+            inner: Arc::new(ArcSwap::new(self.inner.load_full())),
+        }
+    }
+
     /// Atomically adopts another config's inner data via a lock-free
     /// `ArcSwap::store`, so every shared handle to this `Config` observes the
     /// new settings. Used by the Lua hot-reload path.

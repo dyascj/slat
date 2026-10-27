@@ -534,8 +534,18 @@ pub(super) fn timeout_ticker(
 pub(super) fn retry_front_switch(
     retries: Populated<(Entity, &RetryFrontSwitch)>,
     applications: Query<&Application>,
+    time: Res<Time>,
+    mut last_try: Local<Duration>,
     mut commands: Commands,
 ) {
+    // Each failed ask can block for the AX timeout; asking every frame turned
+    // a slow app into a stutter.
+    const RETRY_EVERY: Duration = Duration::from_millis(100);
+    let now = time.elapsed();
+    if now.saturating_sub(*last_try) < RETRY_EVERY {
+        return;
+    }
+    *last_try = now;
     for (entity, retry) in retries.iter() {
         let Ok(app) = applications.get(retry.0) else {
             // Application entity no longer exists, clean up.

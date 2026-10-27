@@ -811,6 +811,81 @@ floating = true
         .run(commands);
 }
 
+/// Swaps in `next` the way a config reload does and runs the reload's side
+/// effects, which re-check window rules against open windows.
+fn reload_config(world: &mut World, next: Config) {
+    use bevy::ecs::system::RunSystemOnce;
+    let previous = world.resource::<Config>().snapshot();
+    world.insert_resource(next);
+    world
+        .run_system_once(
+            move |mut displays: Query<&mut crate::manager::Display>,
+                  windows: crate::ecs::params::Windows,
+                  apps: Query<&crate::manager::Application>,
+                  config: Res<Config>,
+                  mut commands: Commands| {
+                crate::ecs::apply_config_side_effects(
+                    &previous,
+                    &config,
+                    &mut displays,
+                    &windows,
+                    &apps,
+                    &mut commands,
+                );
+            },
+        )
+        .expect("reload system runs");
+}
+
+/// Adding an "always float" rule floats the app's open windows on reload, and
+/// removing it tiles them again. Before, rules were only checked when a window
+/// first appeared.
+#[test]
+fn test_reload_applies_floating_rule_to_open_windows() {
+    let floats_window_1 = || {
+        let mut params = WindowParams::new("^Window 1$", None);
+        params.floating = Some(true);
+        Config::from((MainOptions::default(), vec![params]))
+    };
+    let is_floating = |world: &mut World, id| {
+        let entity = find_window_entity(id, world);
+        matches!(
+            world.entity(entity).get::<crate::ecs::Unmanaged>(),
+            Some(crate::ecs::Unmanaged::Floating)
+        )
+    };
+    let in_strip = |world: &mut World, id| {
+        let entity = find_window_entity(id, world);
+        let mut strips = world.query::<&LayoutStrip>();
+        strips.iter(world).any(|strip| strip.contains(entity))
+    };
+
+    let commands = vec![
+        Event::Command {
+            command: Command::PrintState,
+        };
+        3
+    ];
+
+    TestHarness::new()
+        .with_windows(3)
+        .on_iteration(0, move |world, _state| {
+            assert!(!is_floating(world, 1), "no rule yet, window 1 is tiled");
+            reload_config(world, floats_window_1());
+        })
+        .on_iteration(1, move |world, _state| {
+            assert!(is_floating(world, 1), "the new rule floats window 1");
+            assert!(!in_strip(world, 1), "a floated window leaves the row");
+            assert!(!is_floating(world, 0), "other windows stay tiled");
+            reload_config(world, Config::default());
+        })
+        .on_iteration(2, move |world, _state| {
+            assert!(!is_floating(world, 1), "removing the rule tiles it again");
+            assert!(in_strip(world, 1), "the window is back in the row");
+        })
+        .run(commands);
+}
+
 /// Regression test: during startup (`Initializing`), `apply_window_defaults` and
 /// `apply_window_positions` must classify floating windows as `Unmanaged::Floating`
 /// *before* `finish_setup` populates the workspace strip and selects the initial

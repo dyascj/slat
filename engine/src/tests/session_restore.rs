@@ -517,8 +517,10 @@ fn test_startup_restore_uses_first_restored_row_when_active_metadata_is_missing(
     );
 }
 
+/// A floating rule wins over a saved session that had the window tiled, so
+/// restarting Slat never undoes an "always float" rule.
 #[test]
-fn test_startup_restore_overrides_floating_config_for_matched_window() {
+fn test_floating_rule_wins_over_startup_restore() {
     let mut params = WindowParams::new(".*", Some("test".to_string()));
     params.floating = Some(true);
     let config: Config = (MainOptions::default(), vec![params]).into();
@@ -538,8 +540,11 @@ fn test_startup_restore_overrides_floating_config_for_matched_window() {
     let world = harness.world();
     let restored_window = crate::tests::harness::find_window_entity(0, world);
     assert!(
-        world.entity(restored_window).get::<Unmanaged>().is_none(),
-        "matched restore windows should not inherit floating config"
+        matches!(
+            world.entity(restored_window).get::<Unmanaged>(),
+            Some(Unmanaged::Floating)
+        ),
+        "a window with a floating rule floats even when the saved session tiled it"
     );
 }
 

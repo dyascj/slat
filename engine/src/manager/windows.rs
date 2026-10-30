@@ -737,10 +737,14 @@ impl WindowApi for WindowOS {
         send_move(
             pid,
             window_id,
-            Box::new(move || {
-                let _enhanced_ui = enhanced.and_then(|(state, app_element, absent)| {
-                    disable_enhanced_ui_for(&absent, pid, state, app_element, window_id)
-                });
+            Box::new(move |hold: &mut MoveHold| {
+                if hold.is_none() {
+                    *hold = enhanced
+                        .and_then(|(state, app_element, absent)| {
+                            disable_enhanced_ui_for(&absent, pid, state, app_element, window_id)
+                        })
+                        .map(|guard| Box::new(guard) as Box<dyn Send>);
+                }
                 set_ax_position_of(&element, point);
             }),
         );
@@ -1132,8 +1136,19 @@ fn set_ax_position_of(element: &AXUIWrapper, mut point: CGPoint) -> bool {
     true
 }
 
-type MoveJob = Box<dyn FnOnce() + Send>;
+/// Whatever a move job wants kept alive across the moves that follow it: the
+/// app's `AXEnhancedUserInterface` guard.
+type MoveHold = Option<Box<dyn Send>>;
+type MoveJob = Box<dyn FnOnce(&mut MoveHold) + Send>;
 type MoveSender = std::sync::mpsc::Sender<(WinID, MoveJob)>;
+
+/// How long a mover keeps its app's [`MoveHold`] after the last move.
+///
+/// Browsers (Zen, Firefox, Chrome) report `AXEnhancedUserInterface` on, and
+/// flipping it off and back on costs them real work. Doing that around every
+/// animation frame, as each move once did, made their windows trail the row.
+/// Holding it off for the whole slide flips it once each way.
+const MOVE_HOLD_LINGER: Duration = Duration::from_millis(250);
 
 /// Applies window moves on one thread per app instead of on the engine loop.
 ///
@@ -1147,7 +1162,7 @@ type MoveSender = std::sync::mpsc::Sender<(WinID, MoveJob)>;
 fn send_move(pid: Pid, window_id: WinID, job: MoveJob) {
     static MOVERS: LazyLock<Mutex<HashMap<Pid, MoveSender>>> = LazyLock::new(Mutex::default);
     let Ok(mut movers) = MOVERS.lock() else {
-        return job();
+        return job(&mut None);
     };
     let sender = movers.entry(pid).or_insert_with(|| spawn_mover(pid));
     if let Err(std::sync::mpsc::SendError((window_id, job))) = sender.send((window_id, job)) {
@@ -1162,19 +1177,39 @@ fn spawn_mover(pid: Pid) -> MoveSender {
     let (sender, receiver) = std::sync::mpsc::channel::<(WinID, MoveJob)>();
     let spawned = thread::Builder::new()
         .name(format!("mover-{pid}"))
-        .spawn(move || {
-            while let Ok(first) = receiver.recv() {
-                let mut batch = vec![first];
-                batch.extend(receiver.try_iter());
-                for (_, job) in latest_per_window(batch) {
-                    objc2::rc::autoreleasepool(|_| job());
-                }
-            }
-        });
+        .spawn(move || run_mover(&receiver, MOVE_HOLD_LINGER));
     if let Err(err) = spawned {
         warn!("spawning the mover for pid {pid}: {err}");
     }
     sender
+}
+
+/// Applies moves until the engine hangs up, releasing the hold once no move
+/// has arrived for `linger`. Blocks without waking while nothing is held.
+fn run_mover(receiver: &std::sync::mpsc::Receiver<(WinID, MoveJob)>, linger: Duration) {
+    use std::sync::mpsc::RecvTimeoutError;
+    let mut hold: MoveHold = None;
+    loop {
+        let next = if hold.is_some() {
+            receiver.recv_timeout(linger)
+        } else {
+            receiver.recv().map_err(|_| RecvTimeoutError::Disconnected)
+        };
+        let first = match next {
+            Ok(first) => first,
+            Err(RecvTimeoutError::Timeout) => {
+                objc2::rc::autoreleasepool(|_| drop(hold.take()));
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
+        let mut batch = vec![first];
+        batch.extend(receiver.try_iter());
+        for (_, job) in latest_per_window(batch) {
+            objc2::rc::autoreleasepool(|_| job(&mut hold));
+        }
+    }
+    objc2::rc::autoreleasepool(|_| drop(hold));
 }
 
 /// Keeps only the newest entry for each window, in the order they were newest.
@@ -1709,5 +1744,63 @@ mod mover_tests {
             latest_per_window(batch),
             vec![(1, "a2"), (3, "c1"), (2, "b2")]
         );
+    }
+
+    /// The enhanced UI hold is taken once per slide, not once per frame.
+    #[test]
+    fn mover_holds_across_moves_and_releases_when_idle() {
+        use super::{MoveHold, MoveJob, run_mover};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
+
+        struct Released(Arc<AtomicUsize>);
+        impl Drop for Released {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let acquired = Arc::new(AtomicUsize::new(0));
+        let released = Arc::new(AtomicUsize::new(0));
+        let (done, finished) = mpsc::channel();
+        let job = || -> MoveJob {
+            let (acquired, released, done) = (acquired.clone(), released.clone(), done.clone());
+            Box::new(move |hold: &mut MoveHold| {
+                if hold.is_none() {
+                    acquired.fetch_add(1, Ordering::SeqCst);
+                    *hold = Some(Box::new(Released(released)));
+                }
+                done.send(()).unwrap();
+            })
+        };
+        let wait_for_release = |count: usize| {
+            for _ in 0..500 {
+                if released.load(Ordering::SeqCst) == count {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            panic!("hold was not released");
+        };
+
+        let (sender, receiver) = mpsc::channel();
+        let mover = std::thread::spawn(move || run_mover(&receiver, Duration::from_secs(1)));
+        // One move at a time, each well inside the linger, so each is its own batch.
+        for _ in 0..5 {
+            sender.send((1, job())).unwrap();
+            finished.recv().unwrap();
+        }
+        assert_eq!(acquired.load(Ordering::SeqCst), 1);
+        assert_eq!(released.load(Ordering::SeqCst), 0);
+
+        wait_for_release(1);
+
+        sender.send((1, job())).unwrap();
+        finished.recv().unwrap();
+        drop(sender);
+        mover.join().unwrap();
+        assert_eq!(acquired.load(Ordering::SeqCst), 2);
+        assert_eq!(released.load(Ordering::SeqCst), 2);
     }
 }

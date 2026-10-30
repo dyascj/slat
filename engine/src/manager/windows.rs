@@ -1763,29 +1763,41 @@ mod mover_tests {
 
         let acquired = Arc::new(AtomicUsize::new(0));
         let released = Arc::new(AtomicUsize::new(0));
+        let (done, finished) = mpsc::channel();
         let job = || -> MoveJob {
-            let (acquired, released) = (acquired.clone(), released.clone());
+            let (acquired, released, done) = (acquired.clone(), released.clone(), done.clone());
             Box::new(move |hold: &mut MoveHold| {
                 if hold.is_none() {
                     acquired.fetch_add(1, Ordering::SeqCst);
                     *hold = Some(Box::new(Released(released)));
                 }
+                done.send(()).unwrap();
             })
+        };
+        let wait_for_release = |count: usize| {
+            for _ in 0..500 {
+                if released.load(Ordering::SeqCst) == count {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            panic!("hold was not released");
         };
 
         let (sender, receiver) = mpsc::channel();
-        let mover = std::thread::spawn(move || run_mover(&receiver, Duration::from_millis(100)));
+        let mover = std::thread::spawn(move || run_mover(&receiver, Duration::from_secs(1)));
+        // One move at a time, each well inside the linger, so each is its own batch.
         for _ in 0..5 {
             sender.send((1, job())).unwrap();
-            std::thread::sleep(Duration::from_millis(20));
+            finished.recv().unwrap();
         }
         assert_eq!(acquired.load(Ordering::SeqCst), 1);
         assert_eq!(released.load(Ordering::SeqCst), 0);
 
-        std::thread::sleep(Duration::from_millis(250));
-        assert_eq!(released.load(Ordering::SeqCst), 1);
+        wait_for_release(1);
 
         sender.send((1, job())).unwrap();
+        finished.recv().unwrap();
         drop(sender);
         mover.join().unwrap();
         assert_eq!(acquired.load(Ordering::SeqCst), 2);

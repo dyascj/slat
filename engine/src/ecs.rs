@@ -186,7 +186,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
             !added.is_empty() || removed.read().next().is_some()
         };
     // Housekeeping that makes AX calls waits until nothing is sliding.
-    let settled = |moving: Query<(), bevy::ecs::query::Or<(With<RepositionMarker>, With<ResizeMarker>)>>| moving.is_empty();
+    let settled = |moving: Query<(), systems::Animating>| moving.is_empty();
     let native_tabs_enabled =
         |config: Option<Res<Config>>| config.is_none_or(|config| config.native_tabs_enabled());
 

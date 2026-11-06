@@ -1212,6 +1212,19 @@ fn to_next_display(
     let center = other.bounds().center().x;
     let target_display_id = other.id();
 
+    // Find the target row before touching the window: if the other display is
+    // mid-reconfigure, leaving now beats a window that is in no row at all.
+    let Ok(target_space_id) = window_manager.active_display_space(target_display_id) else {
+        return;
+    };
+    if !other_workspaces
+        .iter()
+        .any(|(strip, _)| strip.id() == target_space_id)
+    {
+        debug!("display {target_display_id} has no row for space {target_space_id}.");
+        return;
+    }
+
     let Some(size) = windows.size(entity) else {
         return;
     };
@@ -1241,10 +1254,9 @@ fn to_next_display(
     }
 
     // Insert into the target display's selected strip.
-    if let Ok(target_space_id) = window_manager.active_display_space(target_display_id)
-        && let Some((mut target_strip, child)) = other_workspaces
-            .iter_mut()
-            .find(|(strip, _)| strip.id() == target_space_id)
+    if let Some((mut target_strip, child)) = other_workspaces
+        .iter_mut()
+        .find(|(strip, _)| strip.id() == target_space_id)
     {
         target_strip.append(entity);
         commands.reshuffle_around(entity);
@@ -1406,11 +1418,14 @@ fn balance_strip(
     let Some((_, focused_entity)) = windows.focused() else {
         return;
     };
+    let strip = active_display.active_strip();
+    // A floating panel's width says nothing about the columns.
+    if !strip.contains(focused_entity) {
+        return;
+    }
     let Some(focused_width) = windows.size(focused_entity).map(|s| s.x) else {
         return;
     };
-
-    let strip = active_display.active_strip();
 
     for column in strip.columns() {
         if matches!(column, Column::Fullscren(_)) {

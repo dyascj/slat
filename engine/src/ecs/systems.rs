@@ -647,7 +647,11 @@ impl AnimationClock {
     /// when nothing is animating.
     fn ms_until_step(&self, now: Duration) -> Option<u32> {
         let wait = (self.last_step? + self.interval).saturating_sub(now);
-        Some(u32::try_from(wait.as_millis()).unwrap_or(u32::MAX).max(LOOP_TIMEOUT_STEP))
+        Some(
+            u32::try_from(wait.as_millis())
+                .unwrap_or(u32::MAX)
+                .max(LOOP_TIMEOUT_STEP),
+        )
     }
 }
 
@@ -657,10 +661,11 @@ fn display_refresh_hz() -> f64 {
     };
     objc2_app_kit::NSScreen::mainScreen(mtm)
         .and_then(|screen| u32::try_from(screen.maximumFramesPerSecond()).ok())
+        .filter(|&hz| hz > 0)
         .map_or(60.0, f64::from)
 }
 
-type Animating = Or<(With<RepositionMarker>, With<ResizeMarker>)>;
+pub(super) type Animating = Or<(With<RepositionMarker>, With<ResizeMarker>)>;
 
 /// Runs before the animators: decides whether this loop turn draws a frame.
 pub(super) fn tick_animation_clock(
@@ -905,7 +910,13 @@ pub(crate) fn pump_events(
             // The clock is a frame behind here, so this errs early, never late.
             // A coasting row steps per turn, so it gets display rate too; a
             // flash message alone is fine at 60 Hz.
-            let fallback = if activity.scrolling() { (1000.0 / display_refresh_hz()) as u32 } else { LOOP_MAX_TIMEOUT_FRAME_ACTIVE_MS };
+            // display_refresh_hz is at least 1, so this is a small positive number.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let fallback = if activity.scrolling() {
+                (1000.0 / display_refresh_hz()) as u32
+            } else {
+                LOOP_MAX_TIMEOUT_FRAME_ACTIVE_MS
+            };
             clock
                 .ms_until_step(time.elapsed())
                 .unwrap_or(fallback)
@@ -919,13 +930,20 @@ pub(crate) fn pump_events(
             // Real events wake the pump at once, so a settled engine can back
             // off quickly: about ten turns to the cap rather than ~500. Never
             // past the next pending timeout, though.
-            let limit = if low_power { LOOP_MAX_TIMEOUT_LOWPOWER_MS } else { LOOP_MAX_TIMEOUT_MS };
+            let limit = if low_power {
+                LOOP_MAX_TIMEOUT_LOWPOWER_MS
+            } else {
+                LOOP_MAX_TIMEOUT_MS
+            };
             let next_timer = timers
                 .iter()
                 .map(|t| u32::try_from(t.timer.remaining().as_millis()).unwrap_or(u32::MAX))
                 .min()
                 .unwrap_or(u32::MAX);
-            timeout.saturating_mul(2).min(next_timer.saturating_add(1)).clamp(LOOP_TIMEOUT_STEP, limit)
+            timeout
+                .saturating_mul(2)
+                .min(next_timer.saturating_add(1))
+                .clamp(LOOP_TIMEOUT_STEP, limit)
         };
     } else {
         // Still backed up: come straight back rather than sleeping on it.
@@ -2169,6 +2187,10 @@ mod animation_clock_tests {
         assert_eq!(clock.ms_until_step(t0), None, "nothing animating");
         clock.tick(t0, || 120.0);
         assert_eq!(clock.ms_until_step(t0 + Duration::from_millis(2)), Some(6));
-        assert_eq!(clock.ms_until_step(t0 + Duration::from_millis(30)), Some(1), "overdue still waits a little");
+        assert_eq!(
+            clock.ms_until_step(t0 + Duration::from_millis(30)),
+            Some(1),
+            "overdue still waits a little"
+        );
     }
 }

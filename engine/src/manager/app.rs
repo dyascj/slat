@@ -484,7 +484,10 @@ impl WindowResolver {
                             let kind = pending.kind;
                             let repeat = matches!(kind, WindowNotification::FocusedElement)
                                 && last_focused == Some(window_id);
-                            if matches!(kind, WindowNotification::Focused | WindowNotification::FocusedElement) {
+                            if matches!(
+                                kind,
+                                WindowNotification::Focused | WindowNotification::FocusedElement
+                            ) {
                                 last_focused = Some(window_id);
                             }
                             if !repeat {

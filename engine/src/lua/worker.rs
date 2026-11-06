@@ -493,6 +493,14 @@ impl Task<'_> {
     }
 }
 
+/// Publishes which events the script listens for, and tells the event tap
+/// whether pointer moves are worth forwarding.
+fn publish_mask(subscribed_events: &AtomicU64, mask: u64) {
+    subscribed_events.store(mask, Ordering::Relaxed);
+    let mouse = LuaEvent::bit_for_name("mouse_moved") | LuaEvent::bit_for_name("mouse_dragged");
+    set_lua_wants_mouse(mask & mouse != 0);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1707,12 +1715,4 @@ mod tests {
             "AXWindow/AXStandardWindow"
         );
     }
-}
-
-/// Publishes which events the script listens for, and tells the event tap
-/// whether pointer moves are worth forwarding.
-fn publish_mask(subscribed_events: &AtomicU64, mask: u64) {
-    subscribed_events.store(mask, Ordering::Relaxed);
-    let mouse = LuaEvent::bit_for_name("mouse_moved") | LuaEvent::bit_for_name("mouse_dragged");
-    set_lua_wants_mouse(mask & mouse != 0);
 }

@@ -400,8 +400,11 @@ where
 
     Some(
         if continuous_swipe && let Some((left_snap, right_snap)) = left_snap.zip(right_snap) {
-            // Allow to scroll away until the last or first window snaps.
-            current_offset.clamp(viewport.min.x - left_snap, viewport.max.x - right_snap)
+            // Allow to scroll away until the last or first window snaps. Right
+            // after a reorder the positions are a frame stale and the bounds can
+            // cross, which would make `clamp` panic; order them first.
+            let (a, b) = (viewport.min.x - left_snap, viewport.max.x - right_snap);
+            current_offset.clamp(a.min(b), a.max(b))
         } else if viewport.width() < total_strip_width {
             // Snap the strip directly to the edges.
             current_offset.clamp(viewport.max.x - total_strip_width, viewport.min.x)

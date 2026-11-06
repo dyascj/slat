@@ -986,7 +986,14 @@ impl LayoutStrip {
                         .filter_map(|item| item.top().and_then(get_window_frame))
                         .map(|frame| frame.height())
                         .collect::<Vec<_>>();
-                    binpack_heights(&current_heights, MIN_WINDOW_HEIGHT, layout_strip_height)?
+                    // A stack too deep for the minimum height splits evenly
+                    // instead of dropping the column out of the layout, which
+                    // left its windows under their neighbours.
+                    binpack_heights(&current_heights, MIN_WINDOW_HEIGHT, layout_strip_height)
+                        .unwrap_or_else(|| {
+                            let n = items.len().max(1);
+                            vec![layout_strip_height / i32::try_from(n).unwrap_or(i32::MAX); n]
+                        })
                 };
 
                 // Every window in a column shares the master's (top item's)
@@ -2457,6 +2464,38 @@ mod tests {
             .map(|(_, frame)| frame.height())
             .collect::<Vec<_>>();
         assert_eq!(height, vec![500, 300, 200, 500]);
+    }
+
+    /// A stack deeper than the row fits at the minimum height still gets a
+    /// slot for every window (an even split) instead of dropping out of the
+    /// layout and leaving its windows under the next column.
+    #[test]
+    fn test_layout_overfull_stack_splits_evenly() {
+        let mut world = World::new();
+        let entities = world
+            .spawn_batch(vec![(), (), (), ()])
+            .collect::<Vec<Entity>>();
+        let mut strip = LayoutStrip::default();
+        for &entity in &entities {
+            strip.append(entity);
+        }
+        // Column 0 holds windows 0..3; window 3 stays its own column.
+        _ = strip.stack(entities[1]);
+        _ = strip.stack(entities[2]);
+        let get_window_frame = |_| Some(IRect::new(0, 0, 300, 300));
+
+        // 500 px fits two windows at MIN_WINDOW_HEIGHT, not three.
+        let out = strip
+            .relative_positions(500, &get_window_frame)
+            .collect::<Vec<_>>();
+        assert_eq!(out.len(), 4, "every window keeps a slot");
+        let heights = out
+            .iter()
+            .take(3)
+            .map(|(_, f)| f.height())
+            .collect::<Vec<_>>();
+        assert_eq!(heights, vec![166, 166, 166]);
+        assert_eq!(out[3].1.min.x, 300, "the next column sits after the stack");
     }
 
     /// Every single-column window must fill the full viewport height.

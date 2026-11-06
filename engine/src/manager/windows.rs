@@ -1,8 +1,9 @@
 use accessibility_sys::{
-    AXUIElementCreateApplication, AXUIElementRef, AXValueCreate, AXValueGetValue,
-    kAXErrorAttributeUnsupported, kAXErrorNoValue, kAXErrorSuccess, kAXFloatingWindowSubrole,
-    kAXPositionAttribute, kAXRaiseAction, kAXSizeAttribute, kAXStandardWindowSubrole,
-    kAXUnknownRole, kAXUnknownSubrole, kAXValueTypeCGPoint, kAXValueTypeCGSize, kAXWindowRole,
+    AXUIElementCreateApplication, AXUIElementGetPid, AXUIElementRef, AXValueCreate,
+    AXValueGetValue, kAXErrorAttributeUnsupported, kAXErrorNoValue, kAXErrorSuccess,
+    kAXFloatingWindowSubrole, kAXPositionAttribute, kAXRaiseAction, kAXSizeAttribute,
+    kAXStandardWindowSubrole, kAXUnknownRole, kAXUnknownSubrole, kAXValueTypeCGPoint,
+    kAXValueTypeCGSize, kAXWindowRole,
 };
 use bevy::ecs::component::Component;
 use bevy::math::IRect;
@@ -898,15 +899,16 @@ impl WindowApi for WindowOS {
     fn pid(&self) -> Result<Pid> {
         self.pid
             .get_or_init(|| {
-                let pid: Pid = unsafe {
-                    NonNull::new_unchecked(self.ax_element.as_ptr::<Pid>())
-                        .byte_add(0x10)
-                        .read()
-                };
-                (pid != 0).then_some(pid).ok_or(Error::InvalidInput(format!(
-                    "can not get pid from {:?}.",
-                    self.ax_element
-                )))
+                // The public call, not a read at a private struct offset that
+                // a macOS update could move.
+                let mut pid: Pid = 0;
+                let err = unsafe { AXUIElementGetPid(self.ax_element.as_ptr(), &raw mut pid) };
+                (err == kAXErrorSuccess && pid != 0)
+                    .then_some(pid)
+                    .ok_or(Error::InvalidInput(format!(
+                        "can not get pid from {:?}.",
+                        self.ax_element
+                    )))
             })
             .clone()
     }

@@ -150,9 +150,7 @@ fn write_state_file(path: &Path, file: &CanvasStateFile) -> std::io::Result<()> 
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, json)?;
-    fs::rename(tmp, path)
+    crate::util::write_atomic(path, &json)
 }
 
 type SaveStrips<'w, 's> = Query<'w, 's, (&'static LayoutStrip, &'static Position), Without<Window>>;
@@ -434,7 +432,9 @@ pub(crate) fn canvas_assign_desks(
                     &title,
                 ) {
                     let entry = saved.windows.swap_remove(index);
-                    placed = Some(IVec2::new(entry.desk_x, entry.desk_y));
+                    // The display may be shorter than the one it was saved on.
+                    let max_y = (viewport.height() - DESK_Y_MARGIN).max(0);
+                    placed = Some(IVec2::new(entry.desk_x, entry.desk_y.clamp(0, max_y)));
                     if let Some(&offset) = saved.strips.get(&(strip.id(), strip.virtual_index)) {
                         restore_offset = Some(offset);
                     }

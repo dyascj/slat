@@ -253,7 +253,7 @@ unsafe extern "C" {
     ///
     /// # Original signature
     /// extern `CFArrayRef` SLSCopyAssociatedWindows(int cid, `uint32_t` wid);
-    pub fn SLSCopyAssociatedWindows(cid: ConnID, window_id: WinID) -> NonNull<CFArray<CFNumber>>;
+    pub fn SLSCopyAssociatedWindows(cid: ConnID, window_id: WinID) -> *mut CFArray<CFNumber>;
 
     /// Queries windows based on a provided `CFArray` of window IDs.
     ///

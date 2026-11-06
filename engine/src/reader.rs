@@ -41,7 +41,8 @@ impl CommandReader {
     pub fn start(self) -> Result<()> {
         let receiver = wire::bind::<Request>(&service_name()).inspect_err(|_| {
             error!(
-                "can not register a Mach port - maybe another Paneru instance is already running?"
+                "can not register a Mach port - maybe another {} instance is already running?",
+                env!("CARGO_BIN_NAME")
             );
         })?;
 

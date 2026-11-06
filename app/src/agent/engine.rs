@@ -142,11 +142,23 @@ pub fn restart_delay(attempts: usize) -> Option<Duration> {
 /// Healthy uptime after which the restart counter resets.
 pub const RESET_AFTER: Duration = Duration::from_secs(60);
 
+/// Exit statuses the engine uses when it can't start (`EXIT_*` in
+/// `engine/src/main.rs`). Restarting won't help until the user acts.
+const EXIT_SEPARATE_SPACES: i32 = 3;
+const EXIT_BAD_CONFIG: i32 = 4;
+
 fn exit_message(status: Option<ExitStatus>) -> String {
-    match status.and_then(|s| s.signal()) {
-        Some(sig) => format!("Engine exited with signal {sig}"),
-        None => format!("Engine exited with status {}", status.and_then(|s| s.code()).unwrap_or(-1)),
+    match (status.and_then(|s| s.signal()), status.and_then(|s| s.code())) {
+        (Some(sig), _) => format!("Engine exited with signal {sig}"),
+        (None, Some(EXIT_SEPARATE_SPACES)) => "Turn on “Displays have separate Spaces”, then log out and back in".into(),
+        (None, Some(EXIT_BAD_CONFIG)) => "engine.toml has an error, see engine.log".into(),
+        (None, code) => format!("Engine exited with status {}", code.unwrap_or(-1)),
     }
+}
+
+/// Whether restarting the engine could fix this exit.
+fn worth_restarting(status: Option<ExitStatus>) -> bool {
+    !matches!(status.and_then(|s| s.code()), Some(EXIT_SEPARATE_SPACES | EXIT_BAD_CONFIG))
 }
 
 /// Graceful quit, then SIGTERM, then SIGKILL.
@@ -177,11 +189,7 @@ fn text(v: &Value, k: &str) -> Option<String> {
 }
 
 fn active_update(a: &Value) -> Update {
-    Update {
-        workspace: int(a, "virtual_workspace_number"),
-        app_name: text(a, "focused_app_name"),
-        bundle_id: text(a, "focused_bundle_id"),
-    }
+    Update { workspace: int(a, "virtual_workspace_number"), app_name: text(a, "focused_app_name"), bundle_id: text(a, "focused_bundle_id") }
 }
 
 /// One line of `subscribe --json`.
@@ -309,6 +317,10 @@ impl Agent {
             if self.engine.launched.is_some_and(|t| t.elapsed() >= RESET_AFTER) {
                 self.engine.restart_attempts = 0;
             }
+            if !worth_restarting(status) {
+                self.engine.state = State::Crashed(exit_message(status));
+                return self.changed();
+            }
             self.handle_crash(exit_message(status));
         }
     }
@@ -339,9 +351,8 @@ impl Agent {
                 });
             }
         };
-        let child = locate().and_then(|bin| {
-            command(&bin, &["subscribe", "--json"]).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()
-        });
+        let child =
+            locate().and_then(|bin| command(&bin, &["subscribe", "--json"]).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok());
         let Some(mut child) = child else { return resubscribe(self) };
         if let Some(out) = child.stdout.take() {
             thread::spawn(move || {
@@ -375,10 +386,7 @@ mod tests {
     #[test]
     fn restart_policy() {
         let delays: Vec<_> = (0..5).map(restart_delay).collect();
-        assert_eq!(
-            delays,
-            [Some(Duration::from_secs(1)), Some(Duration::from_secs(2)), Some(Duration::from_secs(5)), None, None]
-        );
+        assert_eq!(delays, [Some(Duration::from_secs(1)), Some(Duration::from_secs(2)), Some(Duration::from_secs(5)), None, None]);
         assert_eq!(RESET_AFTER, Duration::from_secs(60));
     }
 
@@ -386,6 +394,9 @@ mod tests {
     fn exit_messages() {
         assert_eq!(exit_message(Some(ExitStatus::from_raw(1 << 8))), "Engine exited with status 1");
         assert_eq!(exit_message(Some(ExitStatus::from_raw(9))), "Engine exited with signal 9");
+        assert!(exit_message(Some(ExitStatus::from_raw(4 << 8))).contains("engine.toml"));
+        assert!(!worth_restarting(Some(ExitStatus::from_raw(3 << 8))));
+        assert!(worth_restarting(Some(ExitStatus::from_raw(1 << 8))));
     }
 
     #[test]
@@ -396,15 +407,13 @@ mod tests {
             parse_event(r#"{"event":"virtual_workspace_changed","active":{"virtual_workspace_number":3,"focused_app_name":"X"}}"#),
             Some(ws(3))
         );
-        let term = Update {
-            workspace: Some(3),
-            app_name: Some("Terminal".into()),
-            bundle_id: Some("com.apple.Terminal".into()),
-        };
+        let term = Update { workspace: Some(3), app_name: Some("Terminal".into()), bundle_id: Some("com.apple.Terminal".into()) };
         let wc = r#"{"event":"windows_changed","virtual_workspace_number":3,"active":{"display_id":1,"virtual_workspace_number":3,"focused_window_id":321,"focused_bundle_id":"com.apple.Terminal","focused_app_name":"Terminal"}}"#;
         assert_eq!(parse_event(wc), Some(term));
         assert_eq!(
-            parse_event(r#"{"event":"window_focused","window_id":321,"bundle_id":"com.apple.Terminal","app_name":"","virtual_workspace_number":1}"#),
+            parse_event(
+                r#"{"event":"window_focused","window_id":321,"bundle_id":"com.apple.Terminal","app_name":"","virtual_workspace_number":1}"#
+            ),
             Some(Update { workspace: Some(1), app_name: None, bundle_id: Some("com.apple.Terminal".into()) })
         );
         assert_eq!(parse_event(r#"{"event":"display_changed","display_id":1}"#), None);

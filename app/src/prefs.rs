@@ -33,9 +33,8 @@ impl Prefs {
         let mut p = Prefs::load();
         f(&mut p);
         paths::ensure_dirs();
-        let tmp = file().with_extension("json.tmp");
-        if fs::write(&tmp, serde_json::to_vec_pretty(&p).unwrap_or_default()).is_ok() {
-            let _ = fs::rename(tmp, file());
+        if let Ok(data) = serde_json::to_vec_pretty(&p) {
+            let _ = paths::write_atomic(&file(), &data);
         }
     }
 }

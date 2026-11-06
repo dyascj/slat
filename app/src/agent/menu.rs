@@ -22,7 +22,7 @@ const SHORTCUTS: [&[Shortcut]; 4] = [
         ("Move Right", Code::ArrowRight, true, "window swap east", false),
     ],
     &[
-        ("Centre", Code::KeyC, false, "window center", true),
+        ("Center", Code::KeyC, false, "window center", true),
         ("Cycle Width", Code::KeyR, false, "window resize", true),
         ("Narrower", Code::KeyR, true, "window shrink", true),
         ("Full Width", Code::KeyF, false, "window fullwidth", true),
@@ -35,10 +35,7 @@ const SHORTCUTS: [&[Shortcut]; 4] = [
         ("Pop Out Right", Code::BracketRight, true, "window unstack east", true),
         ("Tabs", Code::KeyT, true, "window tabbeddisplay", true),
     ],
-    &[
-        ("Float", Code::KeyT, false, "window manage", false),
-        ("Other Display", Code::KeyN, false, "window nextdisplay", false),
-    ],
+    &[("Float", Code::KeyT, false, "window manage", false), ("Other Display", Code::KeyN, false, "window nextdisplay", false)],
 ];
 
 fn mods(k: ModKey) -> Modifiers {
@@ -68,9 +65,13 @@ fn shortcuts(s: &Settings) -> Submenu {
             items.push(Box::new(item(&format!("{SEND}{cmd}"), &label, !unused, Some((m, key)))));
         }
     }
-    items.push(Box::new(PredefinedMenuItem::separator()));
-    items.push(Box::new(item("", &format!("{}1–9  Switch Workspace", s.mod_key.symbol()), false, None)));
-    items.push(Box::new(item("", "⇧1–9  Move to Workspace", false, None)));
+    // Workspace keys only exist while workspaces are on (see config::bindings).
+    if s.virtual_workspaces_enabled && s.virtual_workspace_count > 0 {
+        let (m, n) = (s.mod_key.symbol(), s.virtual_workspace_count.min(9));
+        items.push(Box::new(PredefinedMenuItem::separator()));
+        items.push(Box::new(item("", &format!("{m}1–{n}  Switch Workspace"), false, None)));
+        items.push(Box::new(item("", &format!("{m}⇧1–{n}  Move to Workspace"), false, None)));
+    }
     let refs: Vec<&dyn IsMenuItem> = items.iter().map(AsRef::as_ref).collect();
     Submenu::with_items("Shortcuts", true, &refs).expect("submenu")
 }

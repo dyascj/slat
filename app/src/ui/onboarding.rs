@@ -1,4 +1,4 @@
-//! First-run onboarding: seven pages from welcome to "Start tiling".
+//! First-run onboarding: seven pages from welcome to "Start Tiling".
 
 use std::ffi::c_void;
 use std::sync::OnceLock;
@@ -34,7 +34,7 @@ const MOVES: [(&str, &str, bool, &[&str]); 5] = [
     ("Move a window", "Carry it one place left or right", true, &["←", "→"]),
     ("Change the width", "Step through ½, ⅔ and full", false, &["R"]),
     ("Fill the screen", "Make the window full width", false, &["F"]),
-    ("Bring it to the centre", "Slide the window to the middle", false, &["C"]),
+    ("Bring it to the center", "Slide the window to the middle", false, &["C"]),
 ];
 
 pub struct Onboarding {
@@ -157,56 +157,56 @@ impl eframe::App for Onboarding {
             }
         });
 
-        egui::Panel::bottom("bottom").exact_size(68.0).show_separator_line(false).frame(theme::glass(Margin::symmetric(40, 0))).show(ui, |ui| {
-            let r = ui.max_rect();
-            ui.painter().hline(r.x_range(), r.top(), Stroke::new(1.0, p.line));
-            ui.horizontal_centered(|ui| {
-                if self.page < DONE {
-                    let later = if self.page == PRACTICE { "Skip for now" } else { "Set up later" };
-                    if theme::button(ui, later, Kind::Plain).clicked() {
-                        self.finish(&ctx, false);
-                    }
-                }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let primary = match self.page {
-                        0 => "Get started",
-                        2 | 3 | PRACTICE => "Continue",
-                        DONE => "Start tiling",
-                        _ => "Next",
-                    };
-                    if theme::button(ui, &format!("{primary}  →"), Kind::Primary).clicked() {
-                        if self.page == DONE {
-                            self.finish(&ctx, true);
-                        } else {
-                            self.go(self.page + 1, now);
-                        }
-                    }
-                    if self.page > 0 && theme::button(ui, "←  Back", Kind::Secondary).clicked() {
-                        self.go(self.page - 1, now);
-                    }
-                });
-            });
-        });
-
-        egui::CentralPanel::default().frame(theme::glass(Margin { left: 48, right: 48, top: 16, bottom: 12 })).show(
+        egui::Panel::bottom("bottom").exact_size(68.0).show_separator_line(false).frame(theme::glass(Margin::symmetric(40, 0))).show(
             ui,
             |ui| {
-                let f = self.fade();
-                rise(ui, f, 0, |ui| {
-                    ui.label(theme::eyebrow(PAGES[self.page].1));
+                let r = ui.max_rect();
+                ui.painter().hline(r.x_range(), r.top(), Stroke::new(1.0, p.line));
+                ui.horizontal_centered(|ui| {
+                    if self.page < DONE {
+                        let later = if self.page == PRACTICE { "Skip for Now" } else { "Set Up Later" };
+                        if theme::button(ui, later, Kind::Plain).clicked() {
+                            self.finish(&ctx, false);
+                        }
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let primary = match self.page {
+                            0 => "Get Started",
+                            2 | 3 | PRACTICE => "Continue",
+                            DONE => "Start Tiling",
+                            _ => "Next",
+                        };
+                        if theme::button(ui, &format!("{primary}  →"), Kind::Primary).clicked() {
+                            if self.page == DONE {
+                                self.finish(&ctx, true);
+                            } else {
+                                self.go(self.page + 1, now);
+                            }
+                        }
+                        if self.page > 0 && theme::button(ui, "←  Back", Kind::Secondary).clicked() {
+                            self.go(self.page - 1, now);
+                        }
+                    });
                 });
-                ui.add_space(2.0);
-                match self.page {
-                    0 => self.welcome(ui),
-                    1 => self.how_it_works(ui),
-                    2 => self.accessibility(ui, now),
-                    3 => self.setup_check(ui),
-                    4 => self.style(ui),
-                    PRACTICE => self.practice(ui),
-                    _ => self.done(ui),
-                }
             },
         );
+
+        egui::CentralPanel::default().frame(theme::glass(Margin { left: 48, right: 48, top: 16, bottom: 12 })).show(ui, |ui| {
+            let f = self.fade();
+            rise(ui, f, 0, |ui| {
+                ui.label(theme::eyebrow(PAGES[self.page].1));
+            });
+            ui.add_space(2.0);
+            match self.page {
+                0 => self.welcome(ui),
+                1 => self.how_it_works(ui),
+                2 => self.accessibility(ui, now),
+                3 => self.setup_check(ui),
+                4 => self.style(ui),
+                PRACTICE => self.practice(ui),
+                _ => self.done(ui),
+            }
+        });
 
         if self.s != self.saved && ctx.dragged_id().is_none() {
             let _ = self.s.save();
@@ -438,7 +438,7 @@ impl Onboarding {
         ui.horizontal(|ui| {
             ui.label(theme::mono(summary, 11.5).weak());
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if theme::small_button(ui, "Check again", Kind::Secondary).clicked() {
+                if theme::small_button(ui, "Check Again", Kind::Secondary).clicked() {
                     self.checker.recheck();
                 }
             });
@@ -516,7 +516,8 @@ impl Onboarding {
                     let (r, _) = ui.allocate_exact_size(vec2(w, 176.0), Sense::hover());
                     art::preview(ui, r, &p, &self.s);
                     ui.add_space(6.0);
-                    let summary = format!("New {} · {} · {}", width_label(self.s.default_column_width), self.s.padding.raw(), self.s.animation.raw());
+                    let summary =
+                        format!("New {} · {} · {}", width_label(self.s.default_column_width), self.s.padding.raw(), self.s.animation.raw());
                     ui.label(theme::mono(summary, 11.0).weak());
                 });
             });

@@ -16,7 +16,7 @@ use objc2_app_kit::{NSAlert, NSApplication};
 use objc2_foundation::NSString;
 
 use super::{Agent, on_main, open_url, terminate};
-use crate::paths::REPO_URL;
+use crate::paths::{APP_NAME, REPO_URL};
 use crate::prefs::Prefs;
 
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
@@ -158,9 +158,8 @@ fn check() -> Result<Option<Release>, String> {
     if !newer(tag, CURRENT) {
         return Ok(None);
     }
-    let url_of = |name: &str| {
-        v["assets"].as_array()?.iter().find(|x| x["name"] == name)?["browser_download_url"].as_str().map(String::from)
-    };
+    let url_of =
+        |name: &str| v["assets"].as_array()?.iter().find(|x| x["name"] == name)?["browser_download_url"].as_str().map(String::from);
     Ok(match (url_of(ASSET), url_of(&format!("{ASSET}.minisig"))) {
         (Some(url), Some(sig)) => Some(Release { version, url, sig }),
         _ => None,
@@ -195,12 +194,16 @@ fn remove(p: &Path) {
 }
 
 fn install(r: &Release) -> Result<(), String> {
+    let target = bundle()?;
+    // Gatekeeper runs a quarantined app from a read-only copy until it is moved.
+    if target.to_string_lossy().contains("/AppTranslocation/") {
+        return Err(format!("move {APP_NAME} to Applications, open it from there, then try again"));
+    }
     let data = curl(&["-m", "600", &r.url])?;
     let sig = String::from_utf8_lossy(&curl(&["-m", "30", &r.sig])?).into_owned();
     if !verified_with(PUBLIC_KEY, &data, &sig, &signed_comment(&r.version)) {
         return Err("the download's signature doesn't match".into());
     }
-    let target = bundle()?;
     let parent = target.parent().ok_or("no install folder")?;
     // Unpack next to the bundle so the swap is a rename on one disk.
     let stage = parent.join(".slat-update");

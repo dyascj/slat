@@ -21,7 +21,7 @@ pub fn run(args: &[String]) {
     let (title, size, resizable) = match kind {
         "onboarding" => (format!("Welcome to {APP_NAME}"), [720.0, 552.0], false),
         "about" => (format!("About {APP_NAME}"), [400.0, 350.0], false),
-        "feedback" => ("Send feedback".to_string(), [500.0, 470.0], false),
+        "feedback" => ("Send Feedback".to_string(), [500.0, 470.0], false),
         _ => ("Settings".to_string(), [760.0, 540.0], true),
     };
     let mut viewport = egui::ViewportBuilder::default()

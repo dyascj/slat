@@ -19,8 +19,8 @@ use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::MainThreadMarker;
 use objc2_app_kit::{
-    NSAccessibility, NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy,
-    NSApplicationWillTerminateNotification, NSRunningApplication,
+    NSAccessibility, NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy, NSApplicationWillTerminateNotification,
+    NSRunningApplication,
 };
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSString};
 use tray_icon::menu::MenuEvent;
@@ -29,6 +29,7 @@ use tray_icon::{TrayIcon, TrayIconBuilder};
 use crate::prefs::Prefs;
 use crate::runtime::{self, EngineState, Runtime};
 use crate::settings::Settings;
+use crate::setup::ax_trusted;
 use crate::{config, paths};
 use engine::{Engine, Proc, State};
 
@@ -71,16 +72,6 @@ pub(crate) fn after(delay: Duration, f: impl FnOnce(&mut Agent) + Send + 'static
     });
 }
 
-#[link(name = "ApplicationServices", kind = "framework")]
-unsafe extern "C" {
-    fn AXIsProcessTrusted() -> u8;
-}
-
-fn ax_trusted() -> bool {
-    // SAFETY: no arguments, no side effects.
-    unsafe { AXIsProcessTrusted() != 0 }
-}
-
 fn open_url(url: String) {
     thread::spawn(move || Command::new("/usr/bin/open").arg(url).status());
 }
@@ -113,14 +104,8 @@ pub fn run() {
     };
     std::mem::forget(observer);
 
-    let sigs = [
-        libc::SIGTERM,
-        libc::SIGINT,
-        runtime::SIG_RESTART,
-        runtime::SIG_START,
-        runtime::SIG_CHECK_UPDATES,
-        runtime::SIG_INSTALL_UPDATE,
-    ];
+    let sigs =
+        [libc::SIGTERM, libc::SIGINT, runtime::SIG_RESTART, runtime::SIG_START, runtime::SIG_CHECK_UPDATES, runtime::SIG_INSTALL_UPDATE];
     match signal_hook::iterator::Signals::new(sigs) {
         Ok(mut signals) => {
             thread::spawn(move || {
@@ -153,11 +138,7 @@ pub fn run() {
 }
 
 fn init() {
-    let tray = TrayIconBuilder::new()
-        .with_icon_templated(icon::glyph(false))
-        .with_tooltip("Slat")
-        .build()
-        .expect("status item");
+    let tray = TrayIconBuilder::new().with_icon_templated(icon::glyph(false)).with_tooltip("Slat").build().expect("status item");
     let agent = Agent {
         tray,
         engine: Engine::default(),

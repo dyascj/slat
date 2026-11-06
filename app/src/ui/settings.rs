@@ -13,7 +13,7 @@ use crate::login::{self, LOGIN_ITEMS_URL, LoginStatus};
 use crate::paths::{self, APP_NAME, BUNDLE_ID};
 use crate::runtime::{self, EngineState, Runtime};
 use crate::settings::{
-    AppRule, Animation, BORDER_COLORS, Layout as RowLayout, ModKey, Padding, RuleAction, Settings, SwipeDirection, WIDTHS, width_label,
+    Animation, AppRule, BORDER_COLORS, Layout as RowLayout, ModKey, Padding, RuleAction, Settings, SwipeDirection, WIDTHS, width_label,
 };
 use crate::setup;
 
@@ -30,12 +30,12 @@ enum Page {
 }
 
 const PAGES: [(Page, &str, &str, &str); 8] = [
-    (Page::General, "general", "General", "Startup, engine and focus behaviour."),
+    (Page::General, "general", "General", "Startup, engine and focus behavior."),
     (Page::Layout, "layout", "Layout", "How windows sit in the row."),
     (Page::Gestures, "gestures", "Gestures", "Slide the row with your trackpad or scroll wheel."),
     (Page::Shortcuts, "shortcuts", "Shortcuts", "Keyboard control of the row."),
     (Page::Workspaces, "workspaces", "Workspaces", "Stack separate rows of windows, one above the other."),
-    (Page::AppRules, "appRules", "App Rules", "Per-app behaviour for new windows."),
+    (Page::AppRules, "appRules", "App Rules", "Per-app behavior, for open and new windows."),
     (Page::Setup, "setup", "Mac Setup", "macOS settings and permissions that can stop a feature."),
     (Page::About, "about", "About", "Version and credits."),
 ];
@@ -45,13 +45,13 @@ const SCROLL_MODIFIERS: [(&str, &str); 6] = [
     ("cmd", "⌘ Command"),
     ("ctrl", "⌃ Control"),
     ("ctrl + alt", "⌃⌥ Control-Option"),
-    ("cmd + alt", "⌘⌥ Command-Option"),
+    ("cmd + alt", "⌥⌘ Option-Command"),
     ("rcmd", "Right ⌘ Command"),
 ];
 
 /// Hold to resize the window under the pointer by moving it: (engine value, label).
 const RESIZE_MODIFIERS: [(&str, &str); 4] =
-    [("", "Off"), ("ctrl + cmd", "⌃⌘ Control-Command"), ("alt + shift", "⌥⇧ Option-Shift"), ("cmd + shift", "⌘⇧ Command-Shift")];
+    [("", "Off"), ("ctrl + cmd", "⌃⌘ Control-Command"), ("alt + shift", "⌥⇧ Option-Shift"), ("cmd + shift", "⇧⌘ Shift-Command")];
 
 /// (group, title, shift, keys, columns only)
 const SHORTCUTS: [(&str, &str, bool, &[&str], bool); 20] = [
@@ -133,6 +133,15 @@ impl eframe::App for SettingsApp {
         chrome(ui);
         let ctx = ui.ctx().clone();
         let now = ctx.input(|i| i.time);
+        // Onboarding or a Mac Setup fix may have saved settings meanwhile; pick
+        // them up on focus so the next save here doesn't undo them.
+        if self.s == self.saved && ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::WindowFocused(true)))) {
+            let disk = Settings::load();
+            if disk != self.saved {
+                self.s = disk.clone();
+                self.saved = disk;
+            }
+        }
         if now >= self.next_poll {
             self.rt = Runtime::read();
             self.login = login::status();
@@ -204,10 +213,22 @@ impl SettingsApp {
             let selected = self.page == page;
             let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
             let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-            let fill = if selected { p.knob } else if resp.hovered() { p.chip } else { egui::Color32::TRANSPARENT };
+            let fill = if selected {
+                p.knob
+            } else if resp.hovered() {
+                p.chip
+            } else {
+                egui::Color32::TRANSPARENT
+            };
             ui.painter().rect_filled(rect, 6, fill);
             let g = theme::galley(ui, theme::text(title.to_lowercase(), 13.0, theme::REGULAR), f32::INFINITY);
-            let color = if selected { p.bright } else if resp.hovered() { p.ink } else { p.muted };
+            let color = if selected {
+                p.bright
+            } else if resp.hovered() {
+                p.ink
+            } else {
+                p.muted
+            };
             ui.painter().galley(pos2(rect.left() + 10.0, rect.center().y - g.size().y / 2.0), g, color);
             if page == Page::Setup && attention > 0 {
                 let c = pos2(rect.right() - 16.0, rect.center().y);
@@ -319,7 +340,8 @@ impl SettingsApp {
                         reveal(&path);
                     }
                     if theme::small_button(ui, "Open in Editor", Kind::Secondary).clicked() {
-                        super::open_with(&["-b", "com.apple.TextEdit", &path.to_string_lossy()]);
+                        // -t: the user's default text editor, not always TextEdit.
+                        super::open_with(&["-t", &path.to_string_lossy()]);
                     }
                 });
                 ui.add_space(10.0);
@@ -375,7 +397,8 @@ impl SettingsApp {
             let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 116.0), Sense::hover());
             art::preview(ui, rect, &p, &self.s);
             ui.add_space(10.0);
-            let summary = format!("New {} · {} · {}", width_label(self.s.default_column_width), self.s.padding.raw(), self.s.animation.raw());
+            let summary =
+                format!("New {} · {} · {}", width_label(self.s.default_column_width), self.s.padding.raw(), self.s.animation.raw());
             ui.label(theme::mono(summary, 11.5).weak());
             ui.add_space(14.0);
         });
@@ -561,8 +584,8 @@ impl SettingsApp {
                 }
             });
         }
-        let n = format!("1…{}", self.s.virtual_workspace_count);
-        section(ui, if canvas { "Workspaces (not used in Canvas)" } else { "Workspaces" });
+        let n = format!("1…{}", self.s.virtual_workspace_count.min(9));
+        section(ui, if self.s.virtual_workspaces_enabled { "Workspaces" } else { "Workspaces (turned off)" });
         card(ui, |ui| {
             shortcut_row(ui, "Go to workspace", mod_sym, false, &[&n]);
             hairline(ui);
@@ -619,7 +642,7 @@ impl SettingsApp {
     fn app_rules(&mut self, ui: &mut Ui) {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            ui.label(theme::body("New windows of these apps open floating or at a fixed width."));
+            ui.label(theme::body("Windows of these apps float, or tile at a fixed width."));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let button = theme::button(ui, "Add App", Kind::Secondary);
                 egui::Popup::menu(&button).width(260.0).show(|ui| {
@@ -635,7 +658,11 @@ impl SettingsApp {
                     egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
                         for app in apps {
                             if menu_item(ui, &app.name) {
-                                self.s.app_rules.push(AppRule { bundle_id: app.bundle_id, app_name: app.name, action: RuleAction::Float {} });
+                                self.s.app_rules.push(AppRule {
+                                    bundle_id: app.bundle_id,
+                                    app_name: app.name,
+                                    action: RuleAction::Float {},
+                                });
                                 ui.close();
                             }
                         }
@@ -709,7 +736,7 @@ impl SettingsApp {
                 }
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if theme::small_button(ui, "Check again", Kind::Secondary).clicked() {
+                if theme::small_button(ui, "Check Again", Kind::Secondary).clicked() {
                     self.checker.recheck();
                 }
             });

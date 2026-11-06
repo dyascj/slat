@@ -4,7 +4,8 @@ use crate::paths::APP_NAME;
 use crate::runtime::{EngineState, Runtime};
 use crate::settings::{Settings, width_label};
 
-fn sysctl(name: &str) -> String {
+/// A string sysctl, e.g. `kern.osproductversion`; "unknown" when unreadable.
+pub fn sysctl(name: &str) -> String {
     let Ok(cname) = std::ffi::CString::new(name) else { return String::new() };
     let mut buf = [0u8; 256];
     let mut len = buf.len();
@@ -26,11 +27,7 @@ pub fn text(s: &Settings) -> String {
         .collect::<Vec<_>>()
         .join("; ");
     let widths = s.preset_column_widths.iter().map(|w| width_label(*w)).collect::<Vec<_>>().join(", ");
-    let swipe = if s.swipe_enabled {
-        format!("{} fingers {:?}", s.swipe_fingers, s.swipe_direction)
-    } else {
-        "off".into()
-    };
+    let swipe = if s.swipe_enabled { format!("{} fingers {:?}", s.swipe_fingers, s.swipe_direction) } else { "off".into() };
     let engine = match Runtime::read() {
         Some(r) if r.engine == EngineState::Running => "running".to_string(),
         Some(r) if r.engine == EngineState::Crashed => {

@@ -16,17 +16,8 @@ use crate::paths::APP_NAME;
 pub fn ax_pane() -> &'static str {
     static NAME: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
     NAME.get_or_init(|| {
-        let mut buf = [0u8; 32];
-        let mut len = buf.len();
-        // SAFETY: sysctlbyname writes at most `len` bytes into `buf`.
-        let ok = unsafe {
-            libc::sysctlbyname(c"kern.osproductversion".as_ptr(), buf.as_mut_ptr().cast(), &raw mut len, std::ptr::null_mut(), 0)
-        } == 0;
-        let major: u32 = if ok {
-            String::from_utf8_lossy(&buf[..len]).split('.').next().and_then(|m| m.trim_end_matches('\0').parse().ok()).unwrap_or(0)
-        } else {
-            0
-        };
+        let version = crate::diagnostics::sysctl("kern.osproductversion");
+        let major: u32 = version.split('.').next().and_then(|m| m.parse().ok()).unwrap_or(0);
         if major >= 27 { "Device Control and Data Access" } else { "Accessibility" }
     })
 }
@@ -118,9 +109,7 @@ pub fn parse_int(s: &str) -> Option<i64> {
 
 /// Any two displays sharing a horizontal band sit side by side.
 pub fn side_by_side(frames: &[[f64; 4]]) -> bool {
-    frames.iter().enumerate().any(|(i, a)| {
-        frames[i + 1..].iter().any(|b| (a[1] + a[3]).min(b[1] + b[3]) - a[1].max(b[1]) > 1.0)
-    })
+    frames.iter().enumerate().any(|(i, a)| frames[i + 1..].iter().any(|b| (a[1] + a[3]).min(b[1] + b[3]) - a[1].max(b[1]) > 1.0))
 }
 
 fn item(id: &'static str, status: Status, title: impl Into<String>, detail: impl Into<String>, affects: &str) -> Item {
@@ -174,7 +163,7 @@ pub fn build_items(e: &Env) -> Vec<Item> {
                 format!("Swipe won't work yet: three-finger drag uses the same movement. Turn it off in Accessibility › Pointer Control, or pick four fingers in {APP_NAME}."),
                 &affects,
             );
-            it.fixes.push(("Use 4 fingers instead".into(), Fix::Fingers(4)));
+            it.fixes.push(("Use 4 Fingers".into(), Fix::Fingers(4)));
             it
         } else if macos_uses(n) {
             let mut it = item(
@@ -185,7 +174,7 @@ pub fn build_items(e: &Env) -> Vec<Item> {
                 &affects,
             );
             if !macos_uses(m) && !(m == 3 && drag) {
-                it.fixes.push((format!("Use {m} fingers instead"), Fix::Fingers(m)));
+                it.fixes.push((format!("Use {m} Fingers"), Fix::Fingers(m)));
             }
             it.fixes.push(("Open Trackpad Settings".into(), Fix::Open(TRACKPAD_URL)));
             it
@@ -258,22 +247,11 @@ pub fn build_items(e: &Env) -> Vec<Item> {
 
     let affects = "Tiling: two window managers fight over the same windows";
     if e.wms.is_empty() {
-        items.push(item(
-            "wm",
-            Status::Ok,
-            "No other window managers running",
-            format!("{APP_NAME} has your windows to itself."),
-            affects,
-        ));
+        items.push(item("wm", Status::Ok, "No other window managers running", format!("{APP_NAME} has your windows to itself."), affects));
     }
     for (name, pid, app) in &e.wms {
-        let mut it = item(
-            "wm",
-            Status::Warning,
-            format!("{name} is running"),
-            format!("Quit {name} and turn off its launch at login."),
-            affects,
-        );
+        let mut it =
+            item("wm", Status::Warning, format!("{name} is running"), format!("Quit {name} and turn off its launch at login."), affects);
         it.fixes.push((format!("Quit {name}"), Fix::Quit(*pid, *app)));
         items.push(it);
     }
@@ -292,13 +270,9 @@ pub fn build_items(e: &Env) -> Vec<Item> {
             it.fixes.push(("Open Login Items".into(), Fix::Open(LOGIN_ITEMS_URL)));
             it
         }
-        (true, LoginStatus::NotFound) => item(
-            "login",
-            Status::Info,
-            "Doesn't start at login",
-            format!("Available once {APP_NAME} is in Applications."),
-            affects,
-        ),
+        (true, LoginStatus::NotFound) => {
+            item("login", Status::Info, "Doesn't start at login", format!("Available once {APP_NAME} is in Applications."), affects)
+        }
         _ => {
             let mut it = item(
                 "login",
@@ -307,7 +281,7 @@ pub fn build_items(e: &Env) -> Vec<Item> {
                 "Turn on Start at login in Settings › General to tile right after a restart.",
                 affects,
             );
-            it.fixes.push(("Fix…".into(), Fix::StartAtLogin));
+            it.fixes.push(("Turn On".into(), Fix::StartAtLogin));
             it
         }
     });
@@ -443,11 +417,7 @@ pub fn screens() -> Vec<Screen> {
         .iter()
         .map(|s| {
             let f = s.frame();
-            Screen {
-                frame: [f.origin.x, f.origin.y, f.size.width, f.size.height],
-                scale: s.backingScaleFactor(),
-                main: main == Some(f),
-            }
+            Screen { frame: [f.origin.x, f.origin.y, f.size.width, f.size.height], scale: s.backingScaleFactor(), main: main == Some(f) }
         })
         .collect()
 }
@@ -512,7 +482,7 @@ mod tests {
         e.defaults.three_drag = None;
         let swipe = &build_items(&e)[1];
         assert_eq!(swipe.title, "macOS also uses 4-finger swipes");
-        assert_eq!(swipe.fixes[0], ("Use 3 fingers instead".into(), Fix::Fingers(3)));
+        assert_eq!(swipe.fixes[0], ("Use 3 Fingers".into(), Fix::Fingers(3)));
         e.defaults.three_swipe = Some(2);
         assert_eq!(build_items(&e)[1].fixes.len(), 1);
     }

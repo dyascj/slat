@@ -17,7 +17,7 @@ Slat is written in Rust, free, and MIT licensed. It lives in the menu bar and ru
 </tr>
 <tr>
 <td><img src="assets/readme/move.gif" alt="Carrying a window along the row"><br><b>Move windows.</b> Carry the focused window left or right, one place at a time.</td>
-<td><img src="assets/readme/width.gif" alt="Cycling a window's width"><br><b>Cycle width.</b> Step a window through ½, ⅔ and full. Its neighbours make room.</td>
+<td><img src="assets/readme/width.gif" alt="Cycling a window's width"><br><b>Cycle width.</b> Step a window through ½, ⅔ and full. Its neighbors make room.</td>
 </tr>
 <tr>
 <td><img src="assets/readme/stack.gif" alt="Stacking windows into one column"><br><b>Stack.</b> Pile windows into one column, then pop them back out.</td>
@@ -29,7 +29,7 @@ Slat is written in Rust, free, and MIT licensed. It lives in the menu bar and ru
 </tr>
 </table>
 
-The keycaps show the default mod key, ⌃⌥. You can switch it to ⌥ or ⌘⌥ in Settings.
+The keycaps show the default mod key, ⌃⌥. You can switch it to ⌥ or ⌥⌘ in Settings.
 
 ## Install
 
@@ -44,7 +44,7 @@ Updates install from the menu bar with one click. Slat checks GitHub once a day 
 
 ## Shortcuts
 
-The default mod key is `⌃⌥`. Settings › Shortcuts switches it to `⌥` or `⌘⌥`.
+The default mod key is `⌃⌥`. Settings › Shortcuts switches it to `⌥` or `⌥⌘`.
 
 | Keys | Action |
 |---|---|

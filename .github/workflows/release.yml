@@ -6,7 +6,7 @@ permissions:
   contents: write
 jobs:
   macos:
-    runs-on: macos-14
+    runs-on: macos-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4

@@ -115,7 +115,13 @@ pub fn sliding_row(painter: &Painter, rect: Rect, p: &Pal, t: f64, period: f64, 
     let first = step.min(next) - 4;
     let wins: Vec<Win> = (first..first + 10)
         .map(|i| {
-            let solid = if i == step { 1.0 - frac } else if i == next { frac } else { 0.0 };
+            let solid = if i == step {
+                1.0 - frac
+            } else if i == next {
+                frac
+            } else {
+                0.0
+            };
             Win::new(PATTERN[i.rem_euclid(5) as usize], solid)
         })
         .collect();
@@ -126,12 +132,8 @@ pub fn sliding_row(painter: &Painter, rect: Rect, p: &Pal, t: f64, period: f64, 
 pub fn opening_row(painter: &Painter, rect: Rect, p: &Pal, t: f64) {
     let ph = (t % 5.0) as f32;
     let grow = smooth((ph - 0.8) / 0.7) * (1.0 - smooth((ph - 4.2) / 0.6));
-    let wins = [
-        Win::new(0.33, 0.0),
-        Win::new(0.5, 1.0 - grow),
-        Win { w: 0.5 * grow, solid: grow, h: 1.0, alpha: grow },
-        Win::new(0.5, 0.0),
-    ];
+    let wins =
+        [Win::new(0.33, 0.0), Win::new(0.5, 1.0 - grow), Win { w: 0.5 * grow, solid: grow, h: 1.0, alpha: grow }, Win::new(0.5, 0.0)];
     let offset = -0.1 + 0.25 * grow;
     strip(painter, rect, p, &wins, offset, 6.0);
 }

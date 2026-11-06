@@ -1531,3 +1531,44 @@ fn test_remove_display_populates_empty_first_workspace_on_surviving_display() {
         })
         .run(commands);
 }
+
+/// Every virtual row of a Space shares its id, so deleting the Space must drop
+/// all of them, not just the first one found.
+#[test]
+fn test_destroyed_space_drops_every_virtual_row() {
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Stay)),
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::SpaceDestroyed {
+            space_id: TEST_WORKSPACE_ID,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+    let rows = |world: &mut World| {
+        world
+            .query::<&LayoutStrip>()
+            .iter(world)
+            .filter(|s| s.id() == TEST_WORKSPACE_ID)
+            .count()
+    };
+
+    TestHarness::new()
+        .with_windows(3)
+        .on_iteration(3, move |world, _state| {
+            assert!(rows(world) >= 2, "setup: the Space has several rows");
+        })
+        .on_iteration(4, move |world, _state| {
+            assert_eq!(rows(world), 0, "no row of the deleted Space is left");
+        })
+        .run(commands);
+}

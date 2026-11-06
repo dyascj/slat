@@ -3,7 +3,6 @@
 
 use std::collections::HashSet;
 use std::fmt::Write;
-use std::fs;
 
 use crate::paths;
 use crate::settings::{Layout, RuleAction, Settings};
@@ -45,11 +44,7 @@ fn safe_name(bundle_id: &str) -> String {
     if bundle_id.is_empty() {
         return "app".into();
     }
-    let body: String = bundle_id
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '_' })
-        .collect();
+    let body: String = bundle_id.to_lowercase().chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect();
     format!("app_{body}")
 }
 
@@ -57,13 +52,12 @@ fn bindings(s: &Settings) -> Vec<(String, Vec<String>)> {
     let m = s.mod_key.engine_modifier();
     let sh = format!("{m} + shift");
     let one = |k: &str, mods: &str, key: &str| (k.to_string(), vec![format!("{mods} - {key}")]);
-    let two = |k: &str, mods: &str, a: &str, b: &str| {
-        (k.to_string(), vec![format!("{mods} - {a}"), format!("{mods} - {b}")])
-    };
+    let two = |k: &str, mods: &str, a: &str, b: &str| (k.to_string(), vec![format!("{mods} - {a}"), format!("{mods} - {b}")]);
     // With workspace rows, up and down keep going: within a stack first,
     // then to the row above or below.
     let rows = s.virtual_workspaces_enabled && s.layout() != Layout::Canvas;
-    let (north, south) = if rows { ("window_virtualfocus_north", "window_virtualfocus_south") } else { ("window_focus_north", "window_focus_south") };
+    let (north, south) =
+        if rows { ("window_virtualfocus_north", "window_virtualfocus_south") } else { ("window_focus_north", "window_focus_south") };
     let mut out = vec![
         two("window_focus_west", m, "h", "leftarrow"),
         two("window_focus_east", m, "l", "rightarrow"),
@@ -119,10 +113,7 @@ pub fn toml(s: &Settings) -> String {
     if let Some(v) = s.animation.engine_value() {
         line(format!("animation_speed = {}", float(v)));
     }
-    line(format!(
-        "create_virtual_workspace_automatically = {}",
-        s.virtual_workspaces_enabled && s.create_workspaces_automatically
-    ));
+    line(format!("create_virtual_workspace_automatically = {}", s.virtual_workspaces_enabled && s.create_workspaces_automatically));
     if s.animate_workspace_switch {
         line("virtual_workspace_animations = true".into());
     }
@@ -180,11 +171,7 @@ pub fn toml(s: &Settings) -> String {
     line(String::new());
     line("[bindings]".into());
     for (k, v) in bindings(s) {
-        let value = if v.len() == 1 {
-            quote(&v[0])
-        } else {
-            format!("[{}]", v.iter().map(|x| quote(x)).collect::<Vec<_>>().join(", "))
-        };
+        let value = if v.len() == 1 { quote(&v[0]) } else { format!("[{}]", v.iter().map(|x| quote(x)).collect::<Vec<_>>().join(", ")) };
         line(format!("{k} = {value}"));
     }
 
@@ -239,10 +226,7 @@ pub fn apply(s: &Settings) -> std::io::Result<()> {
         return Ok(());
     }
     paths::ensure_dirs();
-    let path = paths::engine_config();
-    let tmp = path.with_extension("toml.tmp");
-    fs::write(&tmp, toml(s))?;
-    fs::rename(tmp, path)
+    paths::write_atomic(&paths::engine_config(), toml(s).as_bytes())
 }
 
 /// Launch-time pass: write the config if missing, regenerate unless custom.
@@ -265,12 +249,10 @@ mod tests {
 
     #[test]
     fn width_rule_keeps_default_width_for_other_apps() {
-        let mut s = Settings::default();
-        s.app_rules = vec![AppRule {
-            bundle_id: "com.a.b".into(),
-            app_name: "b".into(),
-            action: RuleAction::Width { w: 1.0 },
-        }];
+        let s = Settings {
+            app_rules: vec![AppRule { bundle_id: "com.a.b".into(), app_name: "b".into(), action: RuleAction::Width { w: 1.0 } }],
+            ..Settings::default()
+        };
         let t = toml(&s);
         assert!(t.contains("[windows.slat_default_width]"));
         assert!(t.contains("bundle_id = \"com.a.b\"\nwidth = 1.0\n"));
@@ -318,7 +300,10 @@ mod tests {
         assert!(t.contains("mouse_resize_modifier = \"cmd + shift\"\n"));
         assert!(t.contains("[decorations.active.border]\nenabled = true\ncolor = \"#FF375F\"\nwidth = 3.0\n"));
         assert!(t.contains("opacity = -0.3\nopacity_night = -0.4\n"));
-        assert!(t.contains("window_virtualfocus_north = [\"ctrl + alt - k\", \"ctrl + alt - uparrow\"]"), "rows: up/down reach the next row");
+        assert!(
+            t.contains("window_virtualfocus_north = [\"ctrl + alt - k\", \"ctrl + alt - uparrow\"]"),
+            "rows: up/down reach the next row"
+        );
         assert!(t.contains("window_balance = \"ctrl + alt - equal\""));
         let parsed = toml::from_str::<toml::Value>(&t).expect("valid toml");
         assert_eq!(parsed["swipe"]["deceleration"].as_float(), Some(7.0));

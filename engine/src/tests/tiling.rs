@@ -716,6 +716,55 @@ fn test_space_notification_for_dead_window_removes_it() {
     );
 }
 
+/// Closing a window other than the focused one (a terminal whose command
+/// exited, an auto-closing download window) must leave focus where it is.
+#[test]
+fn test_closing_unfocused_window_keeps_focus() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    fn focused(world: &mut World) -> i32 {
+        let mut q = world.query::<(&crate::manager::Window, Has<crate::ecs::FocusedMarker>)>();
+        q.iter(world)
+            .find_map(|(w, f)| f.then_some(w.id()))
+            .expect("a focused window")
+    }
+
+    let commands = vec![
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+    let before = Arc::new(AtomicI32::new(-1));
+    let after = before.clone();
+
+    TestHarness::new()
+        .with_windows(4)
+        .on_iteration(1, move |world, state| {
+            let id = focused(world);
+            before.store(id, Ordering::SeqCst);
+            // Any window but the focused one.
+            state.os_close_window(if id == 3 { 0 } else { 3 });
+        })
+        .on_iteration(3, move |world, _state| {
+            assert_eq!(
+                focused(world),
+                after.load(Ordering::SeqCst),
+                "focus must stay put"
+            );
+        })
+        .run(commands);
+}
+
 /// Closing a floating window despawns it, which removes its `Unmanaged` marker.
 /// That removal must not put the dying window back into the layout strip.
 #[test]

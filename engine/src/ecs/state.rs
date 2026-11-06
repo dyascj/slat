@@ -306,10 +306,7 @@ impl PaneruState {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let tmp_path = path.with_extension("json.tmp");
-        fs::write(&tmp_path, json)?;
-        fs::rename(tmp_path, path)?;
-        Ok(())
+        crate::util::write_atomic(path, json.as_bytes())
     }
 
     pub fn load_from_file(path: &Path) -> Option<Self> {

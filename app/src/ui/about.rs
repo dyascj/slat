@@ -59,7 +59,7 @@ impl About {
                         open(&format!("{REPO_URL}/releases/latest"));
                     }
                 }
-                if theme::small_button(ui, "Send feedback", Kind::Secondary).clicked() {
+                if theme::small_button(ui, "Send Feedback", Kind::Secondary).clicked() {
                     spawn_window("feedback");
                 }
             });
@@ -97,13 +97,10 @@ impl eframe::App for AboutWindow {
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         chrome(ui);
-        egui::CentralPanel::default().frame(theme::glass(Margin::symmetric(28, 0))).show(
-            ui,
-            |ui| {
-                ui.add_space(44.0);
-                self.about.ui(ui);
-            },
-        );
+        egui::CentralPanel::default().frame(theme::glass(Margin::symmetric(28, 0))).show(ui, |ui| {
+            ui.add_space(44.0);
+            self.about.ui(ui);
+        });
     }
 }
 
@@ -183,26 +180,28 @@ impl eframe::App for Feedback {
         let p = theme::pal();
         egui::CentralPanel::default().frame(theme::glass(Margin::symmetric(28, 0))).show(ui, |ui| {
             ui.add_space(40.0);
-            ui.label(theme::title("Send feedback", 22.0));
+            ui.label(theme::title("Send Feedback", 22.0));
             ui.add_space(12.0);
-            theme::segmented(ui, &mut self.kind, &[(FeedbackKind::Bug, "Bug"), (FeedbackKind::Idea, "Idea"), (FeedbackKind::Other, "Other")]);
+            theme::segmented(
+                ui,
+                &mut self.kind,
+                &[(FeedbackKind::Bug, "Bug"), (FeedbackKind::Idea, "Idea"), (FeedbackKind::Other, "Other")],
+            );
             ui.add_space(14.0);
             let prompt = if self.kind == FeedbackKind::Bug { "What happened?" } else { "What would you like?" };
             ui.label(theme::text(prompt, 13.0, theme::MEDIUM));
             ui.add_space(2.0);
-            egui::Frame::new()
-                .fill(p.raised)
-                .stroke(egui::Stroke::new(1.0, p.line))
-                .corner_radius(10)
-                .inner_margin(Margin::same(10))
-                .show(ui, |ui| {
+            egui::Frame::new().fill(p.raised).stroke(egui::Stroke::new(1.0, p.line)).corner_radius(10).inner_margin(Margin::same(10)).show(
+                ui,
+                |ui| {
                     egui::ScrollArea::vertical().max_height(150.0).show(ui, |ui| {
                         ui.add_sized(
                             [ui.available_width(), 150.0],
                             egui::TextEdit::multiline(&mut self.message).frame(egui::Frame::NONE).font(egui::TextStyle::Body),
                         );
                     });
-                });
+                },
+            );
             ui.add_space(12.0);
             ui.horizontal(|ui| {
                 theme::checkbox(ui, &mut self.include, "Include diagnostics and logs");
@@ -221,7 +220,9 @@ impl eframe::App for Feedback {
                     ui.set_width(ui.available_width());
                     egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
                         ui.label(theme::mono(
-                            format!("{diag}\n\nPlus the last {LOG_LINES} lines of engine.log, saved to a file you can drag into the issue."),
+                            format!(
+                                "{diag}\n\nPlus the last {LOG_LINES} lines of engine.log, saved to a file you can drag into the issue."
+                            ),
                             11.0,
                         ));
                     });
@@ -234,7 +235,7 @@ impl eframe::App for Feedback {
                         ui.add(egui::Label::new(theme::caption(r)).wrap());
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if theme::button(ui, "Open issue", Kind::Primary).clicked() {
+                        if theme::button(ui, "Open Issue", Kind::Primary).clicked() {
                             self.submit();
                         }
                         if theme::button(ui, "Cancel", Kind::Secondary).clicked() {
@@ -270,7 +271,9 @@ mod tests {
     #[test]
     fn issue_url_is_encoded_and_capped() {
         let url = issue_url("Bug", "Windows  jump\nwhen I swipe & scroll", Some("Diagnostics\nApp: Slat"));
-        assert!(url.starts_with("https://github.com/dyascj/slat/issues/new?title=Slat%20Bug%3A%20Windows%20jump%20when%20I%20swipe%20%26%20scroll&body="));
+        assert!(url.starts_with(
+            "https://github.com/dyascj/slat/issues/new?title=Slat%20Bug%3A%20Windows%20jump%20when%20I%20swipe%20%26%20scroll&body="
+        ));
         assert!(url.contains("%0A%0ADiagnostics%0AApp%3A%20Slat"));
         let long = "é".repeat(5000);
         assert!(issue_url("Idea", &long, None).len() < MAX_URL);

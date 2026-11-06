@@ -7,7 +7,7 @@ use objc2::rc::{Retained, autoreleasepool};
 use objc2_app_kit::NSScreen;
 use objc2_core_foundation::{
     CFArray, CFBoolean, CFNumber, CFNumberType, CFRetained, CFRunLoop, CFRunLoopMode,
-    CFRunLoopSource, CFString, CFType, Type, kCFTypeArrayCallBacks,
+    CFRunLoopSource, CFString, CFType, ConcreteType, Type, kCFTypeArrayCallBacks,
 };
 use objc2_core_graphics::{CGDirectDisplayID, CGError};
 use objc2_foundation::{NSNumber, NSString, NSUserDefaults, ns_string};
@@ -172,37 +172,37 @@ impl std::fmt::Display for AXUIWrapper {
 pub trait AXUIAttributes {
     fn subrole(&self) -> Result<String> {
         let axname = CFString::from_static_str(kAXSubroleAttribute);
-        self.get_attribute::<CFString>(&axname)
+        self.get_typed_attribute::<CFString>(&axname)
             .map(|value| value.to_string())
     }
 
     fn role(&self) -> Result<String> {
         let axname = CFString::from_static_str(kAXRoleAttribute);
-        self.get_attribute::<CFString>(&axname)
+        self.get_typed_attribute::<CFString>(&axname)
             .map(|value| value.to_string())
     }
 
     fn title(&self) -> Result<String> {
         let axname = CFString::from_static_str(kAXTitleAttribute);
-        self.get_attribute::<CFString>(&axname)
+        self.get_typed_attribute::<CFString>(&axname)
             .map(|value| value.to_string())
     }
 
     fn identifier(&self) -> Result<String> {
         let axname = CFString::from_str("AXIdentifier");
-        self.get_attribute::<CFString>(&axname)
+        self.get_typed_attribute::<CFString>(&axname)
             .map(|value| value.to_string())
     }
 
     fn minimized(&self) -> Result<bool> {
         let axname = CFString::from_static_str(kAXMinimizedAttribute);
-        self.get_attribute::<CFBoolean>(&axname)
+        self.get_typed_attribute::<CFBoolean>(&axname)
             .map(|value| CFBoolean::value(&value))
     }
 
     fn full_screen(&self) -> Result<bool> {
         let axname = CFString::from_str("AXFullScreen");
-        self.get_attribute::<CFBoolean>(&axname)
+        self.get_typed_attribute::<CFBoolean>(&axname)
             .map(|value| CFBoolean::value(&value))
     }
 
@@ -223,6 +223,18 @@ pub trait AXUIAttributes {
     }
 
     fn get_attribute<T: Type>(&self, name: &CFRetained<CFString>) -> Result<CFRetained<T>>;
+
+    /// Like [`Self::get_attribute`], but checks the value's CF type first: an
+    /// app can answer with `kCFNull` or a number where a string belongs, and
+    /// reading that as a string would crash the engine.
+    fn get_typed_attribute<T: ConcreteType>(
+        &self,
+        name: &CFRetained<CFString>,
+    ) -> Result<CFRetained<T>> {
+        self.get_attribute::<CFType>(name)?
+            .downcast::<T>()
+            .map_err(|_| Error::InvalidInput(format!("attribute {name} has an unexpected type.")))
+    }
 }
 
 impl AXUIAttributes for CFRetained<AXUIWrapper> {
@@ -403,4 +415,17 @@ where
         id.is_some_and(|id| id.as_u32() == display_id)
             .then(|| getter(screen))
     })
+}
+
+/// Replaces `path` with `data` atomically: write a temp file, flush it to
+/// disk, then rename it over the target. Without the flush a power loss can
+/// leave the renamed file empty.
+pub fn write_atomic(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let mut file = std::fs::File::create(&tmp)?;
+    file.write_all(data)?;
+    file.sync_all()?;
+    std::fs::rename(tmp, path)
 }

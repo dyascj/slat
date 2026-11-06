@@ -32,6 +32,18 @@ pub fn engine_stdout_log() -> PathBuf {
     logs_dir().join("engine-stdout.log")
 }
 
+/// Writes through a flushed temp file and a rename, so readers never see a
+/// partial file and a power loss can't leave an empty one.
+pub fn write_atomic(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let mut file = std::fs::File::create(&tmp)?;
+    file.write_all(data)?;
+    file.sync_all()?;
+    std::fs::rename(tmp, path)
+}
+
 pub fn ensure_dirs() {
     for d in [support_dir(), state_dir(), logs_dir()] {
         let _ = std::fs::create_dir_all(d);

@@ -235,7 +235,19 @@ fn main() -> Result<()> {
                 Ok(mut app) => {
                     app.run();
                 }
-                Err(err) if embedded => error!("Error launching the engine: {err}."),
+                Err(err) if embedded => {
+                    // The host app restarts a crashed engine, which can't help
+                    // here, so tell it why with the exit status.
+                    error!("Error launching the engine: {err}.");
+                    let code = if !crate::manager::check_separate_spaces() {
+                        EXIT_SEPARATE_SPACES
+                    } else if matches!(err, errors::Error::InvalidConfig(_)) {
+                        EXIT_BAD_CONFIG
+                    } else {
+                        1
+                    };
+                    std::process::exit(code);
+                }
                 Err(err) => {
                     error!(
                         "Error launching Paneru: {err}.\nStopping the service for now. You can restart it again with 'paneru restart'."
@@ -260,15 +272,26 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Embedded exit statuses the Slat host app explains to the user (see
+/// `app/src/agent/engine.rs`). Keep the two in sync.
+const EXIT_SEPARATE_SPACES: i32 = 3;
+const EXIT_BAD_CONFIG: i32 = 4;
+
 /// The embedded engine logs to `~/Library/Logs/Slat/engine.log`. `None`
 /// (stderr) when the file cannot be opened.
 fn embedded_log_file() -> Option<std::fs::File> {
+    // Past this size the log starts over, keeping the previous one as engine.log.1.
+    const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
     let dir = std::env::home_dir()?.join("Library/Logs/Slat");
     std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join("engine.log");
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_LOG_BYTES) {
+        let _ = std::fs::rename(&path, dir.join("engine.log.1"));
+    }
     std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(dir.join("engine.log"))
+        .open(path)
         .ok()
 }
 
@@ -291,13 +314,20 @@ fn manages_service(subcmd: &SubCmd) -> bool {
 /// Embedded: no menu bar and no setup dialog, the host app guides the user.
 /// Polls every 2 s until the permission shows up.
 fn wait_for_accessibility_embedded(sender: EventSender, receiver: &Receiver<Event>) -> bool {
-    let mut platform_callbacks = PlatformCallbacks::new(sender);
+    let mut platform_callbacks = PlatformCallbacks::new(sender.clone());
     let pane = permission_pane_name();
     warn!("{pane} permission is not granted to the host app; waiting for it (polling every 2 s).");
+    // The host subscribes to state as soon as the engine is up. Hold those
+    // subscriptions for the real event loop: dropping them makes the host
+    // respawn a subscriber every second for as long as the wait lasts.
+    let mut subscribers = Vec::new();
     loop {
         platform_callbacks.pump_cocoa_event_loop(2.0);
         if check_ax_privilege() {
             info!("{pane} permission granted; starting.");
+            for event in subscribers {
+                let _ = sender.send(event);
+            }
             return true;
         }
         // Nothing else matters until the permission arrives.
@@ -310,6 +340,7 @@ fn wait_for_accessibility_embedded(sender: EventSender, receiver: &Receiver<Even
                     },
                 )
                 | Err(TryRecvError::Disconnected) => return false,
+                Ok(event @ Event::StateSubscribe { .. }) => subscribers.push(event),
                 Ok(_) => {}
                 Err(TryRecvError::Empty) => break,
             }

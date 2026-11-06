@@ -26,8 +26,8 @@ use crate::ecs::state::PaneruState;
 use crate::ecs::workspace::RestoreFocusMarker;
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, DockPosition, Initializing, LayoutPosition, Position,
-    ResizeMarker, RestoreWindowState, Scrolling, SendMessageTrigger, SpawnCommandsExt,
-    VerifyWindowPosition, WidthRatio, WindowProperties,
+    ResizeMarker, RestoreWindowState, Scrolling, SelectedVirtualMarker, SendMessageTrigger,
+    SpawnCommandsExt, VerifyWindowPosition, WidthRatio, WindowProperties,
 };
 use crate::events::{DestroySource, Event};
 use crate::manager::{
@@ -831,8 +831,11 @@ pub(super) fn window_minimized_trigger(
         debug!("Entity {entity} is minimized or hidden.");
         let display_bounds = active_display.bounds();
 
+        let was_focused = windows
+            .focused()
+            .is_none_or(|(_, focused)| focused == entity);
         for (mut strip, active) in workspaces {
-            if active {
+            if active && was_focused {
                 give_away_focus(
                     entity,
                     &windows,
@@ -850,6 +853,18 @@ pub(super) fn window_minimized_trigger(
     }
 }
 
+/// The row each other display shows: its selected virtual workspace.
+type OtherDisplayRows<'w, 's> = Query<
+    'w,
+    's,
+    (Entity, &'static ChildOf),
+    (
+        With<LayoutStrip>,
+        With<SelectedVirtualMarker>,
+        Without<ActiveWorkspaceMarker>,
+    ),
+>;
+
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 pub(super) fn window_managed_trigger(
     trigger: On<Remove, Unmanaged>,
@@ -864,7 +879,12 @@ pub(super) fn window_managed_trigger(
         ),
         Without<Window>,
     >,
-    previous_strips: Query<&PreviousManagedStrip>,
+    // Where the window can go back to: its remembered row, or another display's.
+    (previous_strips, displays, offscreen_rows): (
+        Query<&PreviousManagedStrip>,
+        Query<(Entity, &Display)>,
+        OtherDisplayRows,
+    ),
     initializing: Option<Res<Initializing>>,
     mut ctx: WindowCtx,
 ) {
@@ -929,6 +949,23 @@ pub(super) fn window_managed_trigger(
                 break;
             }
         }
+    }
+
+    // A window with no remembered row that sits on another display (say, an
+    // app floated there by a rule that was just removed) joins that display's
+    // row instead of being dragged into the one in focus.
+    if landed_in.is_none()
+        && let Some(center) = ctx.windows.frame(entity).map(|frame| frame.center())
+        && let Some((home, _)) = displays
+            .iter()
+            .find(|(_, other)| other.id() != display.id() && other.bounds().contains(center))
+        && let Some((strip_entity, _)) = offscreen_rows
+            .iter()
+            .find(|(_, child_of)| child_of.parent() == home)
+        && let Ok((_, mut strip, _, _)) = workspaces.get_mut(strip_entity)
+    {
+        strip.append(entity);
+        landed_in = Some((strip_entity, false));
     }
 
     if landed_in.is_none()
@@ -1034,14 +1071,21 @@ pub(super) fn window_destroyed_trigger(
 
         app.unobserve_window(window);
 
-        give_away_focus(
-            entity,
-            &windows,
-            active_display.active_strip(),
-            &active_display.bounds(),
-            &mut global_state,
-            &mut commands,
-        );
+        // Only the focused window hands focus on; closing any other window
+        // (an exited terminal, a download panel) leaves focus where it is.
+        if windows
+            .focused()
+            .is_none_or(|(_, focused)| focused == entity)
+        {
+            give_away_focus(
+                entity,
+                &windows,
+                active_display.active_strip(),
+                &active_display.bounds(),
+                &mut global_state,
+                &mut commands,
+            );
+        }
         focus_history.forget(entity);
 
         if let Ok(mut entity_commands) = commands.get_entity(entity) {

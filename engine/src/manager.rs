@@ -352,8 +352,13 @@ impl WindowManagerApi for WindowManagerOS {
     #[instrument(level = Level::TRACE, skip(self), ret)]
     fn get_associated_windows(&self, window_id: WinID) -> Vec<WinID> {
         trace!("for window {window_id}");
-        let windows =
-            unsafe { CFRetained::from_raw(SLSCopyAssociatedWindows(self.main_cid, window_id)) };
+        // NULL when the window closed since the caller found it.
+        let Some(windows) =
+            NonNull::new(unsafe { SLSCopyAssociatedWindows(self.main_cid, window_id) })
+        else {
+            return vec![];
+        };
+        let windows = unsafe { CFRetained::from_raw(windows) };
         windows.into_iter().filter_map(|id| id.as_i32()).collect()
     }
 

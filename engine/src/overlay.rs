@@ -150,12 +150,28 @@ impl DimView {
         self.ivars().set(new);
         let moved_only = old.has_cutout
             && new.has_cutout
-            && DimViewIvars { cutout_x: 0.0, cutout_y: 0.0, cutout_w: 0.0, cutout_h: 0.0, ..old }
-                == DimViewIvars { cutout_x: 0.0, cutout_y: 0.0, cutout_w: 0.0, cutout_h: 0.0, ..new };
+            && DimViewIvars {
+                cutout_x: 0.0,
+                cutout_y: 0.0,
+                cutout_w: 0.0,
+                cutout_h: 0.0,
+                ..old
+            } == DimViewIvars {
+                cutout_x: 0.0,
+                cutout_y: 0.0,
+                cutout_w: 0.0,
+                cutout_h: 0.0,
+                ..new
+            };
         if moved_only {
             // The border straddles the edge and is antialiased: pad by its width.
             let pad = new.border_width + 2.0;
-            let hole = |v: &DimViewIvars| NSRect::new(NSPoint::new(v.cutout_x - pad, v.cutout_y - pad), NSSize::new(v.cutout_w + 2.0 * pad, v.cutout_h + 2.0 * pad));
+            let hole = |v: &DimViewIvars| {
+                NSRect::new(
+                    NSPoint::new(v.cutout_x - pad, v.cutout_y - pad),
+                    NSSize::new(v.cutout_w + 2.0 * pad, v.cutout_h + 2.0 * pad),
+                )
+            };
             self.setNeedsDisplayInRect(hole(&old));
             self.setNeedsDisplayInRect(hole(&new));
         } else {

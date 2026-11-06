@@ -87,7 +87,7 @@ impl ModKey {
         match self {
             ModKey::Alt => "⌥",
             ModKey::CtrlAlt => "⌃⌥",
-            ModKey::CmdAlt => "⌘⌥",
+            ModKey::CmdAlt => "⌥⌘",
         }
     }
     pub fn raw(self) -> &'static str {
@@ -269,9 +269,11 @@ impl Settings {
     }
 
     /// Writes settings.json and, unless custom config mode is on, engine.toml.
+    /// The write is atomic: the agent and other windows read this file at any
+    /// moment, and a torn read would parse as defaults.
     pub fn save(&self) -> std::io::Result<()> {
         paths::ensure_dirs();
-        fs::write(paths::settings_file(), self.to_json())?;
+        paths::write_atomic(&paths::settings_file(), self.to_json().as_bytes())?;
         crate::config::apply(self)
     }
 }

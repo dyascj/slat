@@ -52,9 +52,8 @@ impl Runtime {
     }
 
     pub fn write(&self) {
-        let tmp = file().with_extension("json.tmp");
-        if fs::write(&tmp, serde_json::to_vec(self).unwrap_or_default()).is_ok() {
-            let _ = fs::rename(tmp, file());
+        if let Ok(data) = serde_json::to_vec(self) {
+            let _ = paths::write_atomic(&file(), &data);
         }
     }
 }

@@ -1,9 +1,8 @@
 use accessibility_sys::{
-    AXUIElementCreateApplication, AXUIElementGetPid, AXUIElementRef, AXValueCreate,
-    AXValueGetValue, kAXErrorAttributeUnsupported, kAXErrorNoValue, kAXErrorSuccess,
-    kAXFloatingWindowSubrole, kAXPositionAttribute, kAXRaiseAction, kAXSizeAttribute,
-    kAXStandardWindowSubrole, kAXUnknownRole, kAXUnknownSubrole, kAXValueTypeCGPoint,
-    kAXValueTypeCGSize, kAXWindowRole,
+    AXUIElementCreateApplication, AXUIElementRef, AXValueCreate, AXValueGetValue,
+    kAXErrorAttributeUnsupported, kAXErrorNoValue, kAXErrorSuccess, kAXFloatingWindowSubrole,
+    kAXPositionAttribute, kAXRaiseAction, kAXSizeAttribute, kAXStandardWindowSubrole,
+    kAXUnknownRole, kAXUnknownSubrole, kAXValueTypeCGPoint, kAXValueTypeCGSize, kAXWindowRole,
 };
 use bevy::ecs::component::Component;
 use bevy::math::IRect;
@@ -899,16 +898,25 @@ impl WindowApi for WindowOS {
     fn pid(&self) -> Result<Pid> {
         self.pid
             .get_or_init(|| {
-                // The public call, not a read at a private struct offset that
-                // a macOS update could move.
-                let mut pid: Pid = 0;
-                let err = unsafe { AXUIElementGetPid(self.ax_element.as_ptr(), &raw mut pid) };
-                (err == kAXErrorSuccess && pid != 0)
-                    .then_some(pid)
-                    .ok_or(Error::InvalidInput(format!(
-                        "can not get pid from {:?}.",
-                        self.ax_element
-                    )))
+                // Deliberately the private struct offset, not `AXUIElementGetPid`.
+                // Chromium and Electron apps (Chrome, Zen, Slack, T3 Code) open
+                // short-lived, untitled AXStandardWindows whenever they take
+                // focus. Their elements are only reachable through the remote
+                // token scan, and those elements keep something else at this
+                // offset, so the pid matches no app and the spawn skips them.
+                // `AXUIElementGetPid` returns the real pid, which tiles every
+                // one of those helpers into the row and lets them eat focus
+                // moves (Slat 1.1.4). Replace this only together with an
+                // explicit filter for those windows.
+                let pid: Pid = unsafe {
+                    NonNull::new_unchecked(self.ax_element.as_ptr::<Pid>())
+                        .byte_add(0x10)
+                        .read()
+                };
+                (pid != 0).then_some(pid).ok_or(Error::InvalidInput(format!(
+                    "can not get pid from {:?}.",
+                    self.ax_element
+                )))
             })
             .clone()
     }
